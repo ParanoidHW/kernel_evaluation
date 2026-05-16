@@ -35,6 +35,12 @@ class MatmulSpec:
     batch: int
     trans_a: bool
     trans_b: bool
+    a_format: str = "ND"
+    b_format: str = "ND"
+    output_format: str = "ND"
+    a_storage_elements: int | None = None
+    b_storage_elements: int | None = None
+    output_storage_elements: int | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +110,54 @@ def parse_shapes(value: str | None) -> list[list[int]]:
     return shapes
 
 
+def parse_formats(value: str | None) -> list[str]:
+    if not value or value == "N/A":
+        return []
+    text = value.strip().replace('"', "")
+    return [normalize_format(part.strip()) for part in text.split(";") if part.strip()]
+
+
+def normalize_format(value: str | None) -> str:
+    if not value or value == "N/A":
+        return "ND"
+    text = value.strip().upper().replace("FORMAT_", "")
+    if text in {"NZ", "FRACTAL_NZ"}:
+        return "FRACTAL_NZ"
+    # MatMulV3 tiling maps every non-FRACTAL_NZ storage format to ND.
+    return "ND"
+
+
+def format_at(formats: list[str], index: int) -> str:
+    return formats[index] if index < len(formats) else "ND"
+
+
+def num_elements(shape: list[int]) -> int:
+    total = 1
+    for dim in shape:
+        if dim <= 0:
+            return 0
+        total *= dim
+    return total
+
+
+def batch_dims_for_format(shape: list[int], tensor_format: str) -> list[int]:
+    if tensor_format == "FRACTAL_NZ":
+        return shape[:-4] if len(shape) >= 4 else []
+    return shape[:-2] if len(shape) >= 2 else []
+
+
+def effective_matrix_dims(shape: list[int], tensor_format: str) -> tuple[int, int] | None:
+    if tensor_format == "FRACTAL_NZ":
+        if len(shape) < 4:
+            return None
+        # Matches MatMulV3 GetInputDims for NZ storage:
+        # dim0 = storage[-3] * storage[-2], dim1 = storage[-4] * storage[-1].
+        return shape[-3] * shape[-2], shape[-4] * shape[-1]
+    if len(shape) < 2:
+        return None
+    return shape[-2], shape[-1]
+
+
 def broadcast_batch(lhs: list[int], rhs: list[int]) -> int | None:
     rank = max(len(lhs), len(rhs))
     lhs = [1] * (rank - len(lhs)) + lhs
@@ -118,6 +172,107 @@ def broadcast_batch(lhs: list[int], rhs: list[int]) -> int | None:
         else:
             return None
     return batch
+
+
+def reconcile_k_dim(left_k: int, right_k: int, left_format: str, right_format: str) -> tuple[int, float] | None:
+    if left_k == right_k:
+        return left_k, 2.0
+    if right_format == "FRACTAL_NZ" and right_k >= left_k and ceil_align(left_k, 16) == right_k:
+        return left_k, 1.0
+    if left_format == "FRACTAL_NZ" and left_k >= right_k and ceil_align(right_k, 16) == left_k:
+        return right_k, 1.0
+    return None
+
+
+def output_dim_score(candidate: int, actual: int | None, tensor_format: str) -> tuple[int, float] | None:
+    if actual is None:
+        return candidate, 0.0
+    if candidate == actual:
+        return actual, 2.0
+    if tensor_format == "FRACTAL_NZ" and candidate >= actual and ceil_align(actual, 16) == candidate:
+        return actual, 1.0
+    return None
+
+
+def infer_matmul_spec(
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    input_formats: list[str] | None = None,
+    output_formats: list[str] | None = None,
+) -> MatmulSpec | None:
+    if len(input_shapes) < 2:
+        return None
+    input_formats = input_formats or []
+    output_formats = output_formats or []
+    lhs, rhs = input_shapes[0], input_shapes[1]
+    lhs_format = format_at(input_formats, 0)
+    rhs_format = format_at(input_formats, 1)
+    output_format = format_at(output_formats, 0)
+
+    lhs_dims = effective_matrix_dims(lhs, lhs_format)
+    rhs_dims = effective_matrix_dims(rhs, rhs_format)
+    if lhs_dims is None or rhs_dims is None:
+        return None
+
+    out_dims: tuple[int, int] | None = None
+    if output_shapes:
+        out_dims = effective_matrix_dims(output_shapes[0], output_format)
+    out_m = out_dims[0] if out_dims is not None else None
+    out_n = out_dims[1] if out_dims is not None else None
+
+    batch = broadcast_batch(batch_dims_for_format(lhs, lhs_format), batch_dims_for_format(rhs, rhs_format))
+    if batch is None:
+        return None
+
+    candidates: list[tuple[float, MatmulSpec]] = []
+    for trans_a in (False, True):
+        lhs_m_raw, lhs_k_raw = lhs_dims if not trans_a else (lhs_dims[1], lhs_dims[0])
+        for trans_b in (False, True):
+            rhs_k_raw, rhs_n_raw = rhs_dims if not trans_b else (rhs_dims[1], rhs_dims[0])
+            k_match = reconcile_k_dim(lhs_k_raw, rhs_k_raw, lhs_format, rhs_format)
+            if k_match is None:
+                continue
+            logical_k, k_score = k_match
+
+            m_match = output_dim_score(lhs_m_raw, out_m, lhs_format)
+            n_match = output_dim_score(rhs_n_raw, out_n, rhs_format)
+            if m_match is None or n_match is None:
+                continue
+            logical_m, m_score = m_match
+            logical_n, n_score = n_match
+
+            score = k_score + m_score + n_score
+            if not trans_a:
+                score += 0.1
+            if not trans_b:
+                score += 0.1
+            if lhs_format == "FRACTAL_NZ" or rhs_format == "FRACTAL_NZ":
+                score += 0.5
+
+            candidates.append(
+                (
+                    score,
+                    MatmulSpec(
+                        logical_m,
+                        logical_n,
+                        logical_k,
+                        batch,
+                        trans_a,
+                        trans_b,
+                        a_format=lhs_format,
+                        b_format=rhs_format,
+                        output_format=output_format,
+                        a_storage_elements=num_elements(lhs),
+                        b_storage_elements=num_elements(rhs),
+                        output_storage_elements=num_elements(output_shapes[0]) if output_shapes else None,
+                    ),
+                )
+            )
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def infer_standard_matmul(
@@ -231,10 +386,16 @@ def estimate_tile(
     peak_tflops = peak_for_dtype(config, dtype)
 
     true_flops = 2 * spec.m * spec.n * spec.k * spec.batch
+    logical_a_elements = spec.batch * spec.m * spec.k
+    logical_b_elements = spec.batch * spec.k * spec.n
+    logical_c_elements = spec.batch * spec.m * spec.n
+    a_storage_elements = spec.a_storage_elements or logical_a_elements
+    b_storage_elements = spec.b_storage_elements or logical_b_elements
+    output_storage_elements = spec.output_storage_elements or logical_c_elements
     gm_bytes_min = (
-        spec.batch * spec.m * spec.k * elem_size
-        + spec.batch * spec.k * spec.n * elem_size
-        + spec.batch * spec.m * spec.n * out_size
+        a_storage_elements * elem_size
+        + b_storage_elements * elem_size
+        + output_storage_elements * out_size
     )
 
     best: TileEstimate | None = None
@@ -273,9 +434,9 @@ def estimate_tile(
             # HBM estimate below is L2-aware, matching the kernel's L2 cache
             # decision path rather than pessimistically charging every repeat.
             gm_bytes_tiled_raw = (
-                tile_n * spec.batch * spec.m * spec.k * elem_size
-                + tile_m * spec.batch * spec.k * spec.n * elem_size
-                + spec.batch * spec.m * spec.n * out_size
+                tile_n * a_storage_elements * elem_size
+                + tile_m * b_storage_elements * elem_size
+                + output_storage_elements * out_size
             )
             l2_bytes = int(config.get("l2_bytes", 0))
             if l2_bytes > 0 and gm_bytes_min <= l2_bytes:
@@ -352,8 +513,73 @@ def estimate_tile(
     return best
 
 
+def is_fp32_dtype(dtype: str) -> bool:
+    return dtype in {"FLOAT", "FLOAT32", "DT_FLOAT"}
+
+
+def is_256b_aligned(inner_size: int, dtype_size_value: int) -> bool:
+    return (inner_size * dtype_size_value) % 256 == 0
+
+
+def is_nd2nz_on_the_way_supported(tensor_format: str, inner_size: int, dtype_size_value: int) -> bool:
+    # From MatMulV3 SUPPORT_ND2NZ_GM2L0. These are byte lengths, not element counts.
+    supported_bytes = {32, 64, 96, 128, 160, 192, 224, 256, 384}
+    return tensor_format == "ND" and inner_size * dtype_size_value in supported_bytes
+
+
+def need_nd2nz_for_operand(
+    tensor_format: str,
+    inner_size: int,
+    outer_size: int,
+    dtype: str,
+    dtype_size_value: int,
+) -> bool:
+    if tensor_format != "ND" or dtype_size_value <= 0:
+        return False
+
+    support_on_the_way = is_nd2nz_on_the_way_supported(tensor_format, inner_size, dtype_size_value)
+    inner_aligned = is_256b_aligned(inner_size, dtype_size_value)
+    normal_nd2nz = (
+        (not inner_aligned or inner_size > 65535)
+        and not support_on_the_way
+        and not (is_fp32_dtype(dtype) and inner_size < 65535)
+    )
+
+    will_fit_vnchw = (
+        outer_size > 8192
+        and inner_size > 1
+        and (
+            inner_size * dtype_size_value <= 192
+            or (inner_size * dtype_size_value <= 384 and inner_size % 2 == 0)
+            or (inner_size * dtype_size_value <= 512 and inner_size % 4 == 0)
+        )
+    )
+    inner_equals_c0 = inner_size == 32 // dtype_size_value
+    vnchw_nd2nz = will_fit_vnchw and not inner_aligned and not support_on_the_way and not inner_equals_c0
+    return normal_nd2nz or vnchw_nd2nz
+
+
+def infer_nd2nz_operands(spec: MatmulSpec, dtype: str) -> tuple[bool, bool]:
+    elem_size = dtype_size(dtype)
+    inner_a = spec.m if spec.trans_a else spec.k
+    outer_a = spec.k if spec.trans_a else spec.m
+    inner_b = spec.k if spec.trans_b else spec.n
+    outer_b = spec.n if spec.trans_b else spec.k
+    nd2nz_a = need_nd2nz_for_operand(spec.a_format, inner_a, outer_a, dtype, elem_size)
+    nd2nz_b = need_nd2nz_for_operand(spec.b_format, inner_b, outer_b, dtype, elem_size)
+    return nd2nz_a, nd2nz_b
+
+
 def classify(row: dict[str, Any]) -> tuple[str, str]:
     tags: list[str] = []
+    if row["b_format"] == "FRACTAL_NZ":
+        tags.append("weight_nz")
+    elif row["a_format"] == "FRACTAL_NZ" or row["output_format"] == "FRACTAL_NZ":
+        tags.append("fractal_nz")
+    if row["nd2nz_a"] or row["nd2nz_b"]:
+        tags.append("runtime_nd2nz")
+    if row["storage_padding_ratio"] > 1.05:
+        tags.append("layout_padding")
     if row["m"] <= 4:
         tags.append("small_m_overhead")
     if row["mn_tile_count"] < row["aic_num"]:
@@ -411,7 +637,9 @@ def evaluate_file(
 
             input_shapes = parse_shapes(row.get("Input Shapes"))
             output_shapes = parse_shapes(row.get("Output Shapes"))
-            spec = infer_standard_matmul(input_shapes, output_shapes)
+            input_formats = parse_formats(row.get("Input Formats"))
+            output_formats = parse_formats(row.get("Output Formats"))
+            spec = infer_matmul_spec(input_shapes, output_shapes, input_formats, output_formats)
             if spec is None:
                 unresolved.append(
                     {
@@ -422,6 +650,7 @@ def evaluate_file(
                         "input_shapes": row.get("Input Shapes", ""),
                         "output_shapes": row.get("Output Shapes", ""),
                         "input_formats": row.get("Input Formats", ""),
+                        "output_formats": row.get("Output Formats", ""),
                     }
                 )
                 continue
@@ -436,16 +665,31 @@ def evaluate_file(
             launch_us = calibration_value(config, "launch_overhead_us_by_type", kernel_type, 0.0)
             pipeline_eff = calibration_value(config, "pipeline_efficiency_by_dtype", dtype, 1.0)
             pipeline_eff = max(pipeline_eff, 1e-9)
+            nd2nz_a, nd2nz_b = infer_nd2nz_operands(spec, dtype)
             format_overhead = 0.0
-            input_formats = row.get("Input Formats", "")
-            if "FRACTAL_NZ" in input_formats:
-                format_overhead += calibration_value(config, "format_overhead_us", "FRACTAL_NZ", 0.0)
+            if nd2nz_a or nd2nz_b:
+                format_overhead += (
+                    int(nd2nz_a) + int(nd2nz_b)
+                ) * calibration_value(config, "format_overhead_us", "ND2NZ", 0.0)
 
             compute_for_est = None if tile.compute_us is None else tile.compute_us / pipeline_eff
             if compute_for_est is None:
                 estimated_us = launch_us + tile.hbm_us + format_overhead
             else:
                 estimated_us = launch_us + max(compute_for_est, tile.hbm_us) + format_overhead
+            logical_storage_elements = (
+                spec.batch * spec.m * spec.k
+                + spec.batch * spec.k * spec.n
+                + spec.batch * spec.m * spec.n
+            )
+            physical_storage_elements = (
+                (spec.a_storage_elements or spec.batch * spec.m * spec.k)
+                + (spec.b_storage_elements or spec.batch * spec.k * spec.n)
+                + (spec.output_storage_elements or spec.batch * spec.m * spec.n)
+            )
+            storage_padding_ratio = (
+                physical_storage_elements / logical_storage_elements if logical_storage_elements > 0 else 1.0
+            )
 
             result: dict[str, Any] = {
                 "file": path.name,
@@ -455,13 +699,23 @@ def evaluate_file(
                 "accelerator_core": row.get("Accelerator Core", ""),
                 "dtype": dtype,
                 "output_dtype": output_dtype,
-                "input_formats": input_formats,
+                "input_formats": row.get("Input Formats", ""),
+                "output_formats": row.get("Output Formats", ""),
+                "a_format": spec.a_format,
+                "b_format": spec.b_format,
+                "output_format": spec.output_format,
                 "m": spec.m,
                 "n": spec.n,
                 "k": spec.k,
                 "batch": spec.batch,
                 "trans_a": int(spec.trans_a),
                 "trans_b": int(spec.trans_b),
+                "a_storage_elements": spec.a_storage_elements,
+                "b_storage_elements": spec.b_storage_elements,
+                "output_storage_elements": spec.output_storage_elements,
+                "storage_padding_ratio": storage_padding_ratio,
+                "nd2nz_a": int(nd2nz_a),
+                "nd2nz_b": int(nd2nz_b),
                 "block_dim": parse_int(row.get("Block Dim")),
                 "mix_block_dim": parse_int(row.get("Mix Block Dim")),
                 "aic_num": int(config["aic_num"]),

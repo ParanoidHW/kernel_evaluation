@@ -92,6 +92,35 @@ The first implementation uses deterministic candidate search rather than fitted 
 
 This approximates the kernel behavior visible in MatMulV3 ASW tiling: base block selection, tail balancing, L0C double buffering, and L1/L0 pressure are handled by deterministic constraints rather than shape interpolation.
 
+## FRACTAL_NZ / Weight-NZ Handling
+
+`FRACTAL_NZ` is treated as a storage layout, not as a fitted timing class. This follows the MatMulV3/BatchMatMulV3 kernel logic:
+
+- Kernel compile-time format macros map `FORMAT_FRACTAL_NZ` to `CubeFormat::NZ`; all other formats are treated as `CubeFormat::ND`.
+- Host tiling reconstructs the effective 2D matrix for NZ storage as:
+
+```text
+effective_dim0 = storage[-3] * storage[-2]
+effective_dim1 = storage[-4] * storage[-1]
+```
+
+For example, profiling input `x1=[1,2816]`, `x2=[2048,176,16,16]`, formats `ND;FRACTAL_NZ`, output `[1,32768]` is evaluated as:
+
+```text
+x2 effective = [176*16, 2048*16] = [2816, 32768]
+M = 1, K = 2816, N = 32768
+```
+
+The evaluator uses storage-shape element counts for HBM traffic:
+
+```text
+A_bytes = product(A_storage_shape) * dtype_size
+B_bytes = product(B_storage_shape) * dtype_size
+C_bytes = product(C_storage_shape) * output_dtype_size
+```
+
+This captures layout padding and prepacked weight size directly. A prepacked `FRACTAL_NZ` weight does not by itself add conversion overhead. `format_overhead_us.ND2NZ` is reserved for runtime ND-to-NZ conversion paths detected from the kernel's deterministic conditions. For `ND;FRACTAL_NZ` weight-NZ matmul, the expected dominant term is often the HBM read of the large prepacked B matrix, especially for `M=1` or other small-M GEMV-like shapes.
+
 ## Calibration Parameters
 
 Only these terms should be calibrated:
