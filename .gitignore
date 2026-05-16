@@ -1,0 +1,13 @@
+# Large local inputs and extracted operator sources.
+/example_profilings/
+/ops-nn-master-matmul-*/
+/*.zip
+
+# Generated evaluator outputs.
+/matmul_eval_report.csv
+/matmul_eval_unresolved.csv
+/matmul_eval_calibration_suggested.json
+
+# Python caches.
+__pycache__/
+*.py[cod]

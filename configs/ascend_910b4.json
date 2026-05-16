@@ -1,0 +1,51 @@
+{
+  "soc": "Ascend910B4",
+  "description": "First-pass 910B4 configuration for kernel_evaluation matmul evaluator. Replace assumed fields with CANN platform config values when available.",
+  "sources": {
+    "aic_num": "profiling AI_CORE Block Dim observed as 20",
+    "aiv_num": "assumed 2x AIC for 910B class devices",
+    "hbm_bandwidth_tbps": "user supplied",
+    "cache_sizes": "assumed from common AscendC-style 910B/arch35 configuration; update if platform config is available",
+    "peak_tflops": "initial no-HF32 working assumptions; update if official 910B4 values are available"
+  },
+  "aic_num": 20,
+  "aiv_num": 40,
+  "hbm_bandwidth_tbps": 0.8,
+  "l0a_bytes": 65536,
+  "l0b_bytes": 65536,
+  "l0c_bytes": 262144,
+  "l1_bytes": 524288,
+  "l2_bytes": 201326592,
+  "ub_bytes": 196608,
+  "bt_bytes": 4096,
+  "peak_tflops": {
+    "FLOAT16": 240.0,
+    "DT_BF16": 240.0,
+    "BFLOAT16": 240.0,
+    "FLOAT": 64.0,
+    "FLOAT32": 64.0
+  },
+  "calibration": {
+    "launch_overhead_us_by_type": {
+      "default": 0.0,
+      "MatMul": 0.0,
+      "MatMulV2": 0.0,
+      "MatMulV3": 0.0,
+      "BatchMatMulV2": 0.0
+    },
+    "pipeline_efficiency_by_dtype": {
+      "default": 1.0,
+      "FLOAT16": 1.0,
+      "DT_BF16": 1.0,
+      "BFLOAT16": 1.0,
+      "FLOAT": 1.0,
+      "FLOAT32": 1.0
+    },
+    "format_overhead_us": {
+      "default": 0.0,
+      "ND2NZ": 0.0,
+      "FRACTAL_NZ": 0.0,
+      "NON_CONTIGUOUS": 0.0
+    }
+  }
+}
