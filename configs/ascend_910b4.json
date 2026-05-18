@@ -59,6 +59,8 @@
     "operation_factor": {
       "full_quant": 1.0,
       "full_quant_with_dequant": 1.0,
+      "weight_only_quant": 1.0,
+      "weight_only_quant_with_dequant": 1.0,
       "fake_quant_or_mixed": 2.0
     },
     "dequant_us_per_output_element": 0.0,

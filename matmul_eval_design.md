@@ -252,7 +252,7 @@ Granularity is inferred from scale shapes:
 - Scalar or `[1]`: `per_tensor`.
 - One-dimensional scale equal to `N`: `per_channel_n`.
 - One-dimensional scale equal to `M`: `per_token_m`.
-- If `M == N` and scale is `[M] == [N]`, the result is `per_channel_n_or_per_token_m` because shape alone cannot disambiguate the axis.
+- If `M == N` and scale is `[M] == [N]`, the default result is `per_channel_n_or_per_token_m` because shape alone cannot disambiguate the axis. `QuantBatchMatmulV3` is an exception: the evaluator follows the source API order `scale, offset, bias, pertokenScale`, so a four-input `[N]` scale/offset case is marked as `per_channel_n`.
 - Shapes that divide `M` or `N` are marked as `per_group_or_block`.
 - FP8/MXFP8 dtypes are marked through `quant_mode`; block-size details still require more metadata than the profiling CSV currently exposes.
 
@@ -273,7 +273,7 @@ quant_compute_us =
   (peak_tops * 1e6 * core_eff * quant_pipeline_efficiency)
 ```
 
-For the current `QuantBatchMatmulV3` samples, the inputs are `INT8;INT8;FLOAT;FLOAT`, output is `FLOAT16`, and auxiliary shapes are `[4096]` and `[4096]`. The model infers `int8`, `full_quant_with_dequant`, and `per_channel_n_or_per_token_m` because this shape has `M == N == 4096`.
+For the current `QuantBatchMatmulV3` samples, the inputs are `INT8;INT8;FLOAT;FLOAT`, output is `FLOAT16`, and auxiliary shapes are `[4096]` and `[4096]`. Following the source API order, these auxiliary tensors are `scale` and `offset`, so the model infers `int8`, `full_quant_with_dequant`, and `per_channel_n`.
 
 ## Diagnostics
 
@@ -286,6 +286,7 @@ The output includes diagnosis tags:
 - `al1_full_load`, `bl1_full_load`: the current V3 spec uses an L1 full-load template.
 - `fixpipe_output`: advanced tiling predicts a fixpipe output path.
 - `full_quant_dequant`: low-bit matmul with floating output conversion.
+- `weight_only_quant`, `weight_only_quant_dequant`: weight-only quant matmul paths.
 - `fake_or_mixed_quant`: ambiguous or mixed quantization path.
 - `weight_nz`: B is `FRACTAL_NZ`.
 - `fractal_nz`: A or output is `FRACTAL_NZ`.
@@ -376,7 +377,7 @@ Output dtype = FLOAT16
 M=4096, N=4096, K=12800
 quant_mode = int8
 quant_compute_path = full_quant_with_dequant
-quant_granularity = per_channel_n_or_per_token_m
+quant_granularity = per_channel_n
 median actual / estimate ~= 1.00
 median absolute percentage error ~= 1.0%
 ```

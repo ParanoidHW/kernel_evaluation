@@ -254,7 +254,7 @@ HBM 估算考虑 L2：
 - 标量或 `[1]`：`per_tensor`。
 - 一维 scale 等于 `N`：`per_channel_n`。
 - 一维 scale 等于 `M`：`per_token_m`。
-- 如果 `M == N` 且 scale 为 `[M] == [N]`，则只能标记为 `per_channel_n_or_per_token_m`，因为仅凭 shape 无法判断轴。
+- 如果 `M == N` 且 scale 为 `[M] == [N]`，默认只能标记为 `per_channel_n_or_per_token_m`，因为仅凭 shape 无法判断轴；但 `QuantBatchMatmulV3` 会按源码 API 输入顺序 `scale, offset, bias, pertokenScale` 解析，四输入场景中的 `[N]` scale/offset 会标记为 `per_channel_n`。
 - 如果 scale shape 能整除 `M` 或 `N`，标记为 `per_group_or_block`。
 - FP8/MXFP8 会体现在 `quant_mode` 中，但具体 block size 需要 profiling CSV 之外的元数据。
 
@@ -275,7 +275,7 @@ quant_compute_us =
   (peak_tops * 1e6 * core_eff * quant_pipeline_efficiency)
 ```
 
-当前 `QuantBatchMatmulV3` 样例的输入是 `INT8;INT8;FLOAT;FLOAT`，输出是 `FLOAT16`，两个辅助输入 shape 都是 `[4096]`。由于该规格中 `M == N == 4096`，工具会推断为 `int8`、`full_quant_with_dequant`、`per_channel_n_or_per_token_m`。
+当前 `QuantBatchMatmulV3` 样例的输入是 `INT8;INT8;FLOAT;FLOAT`，输出是 `FLOAT16`，两个辅助输入 shape 都是 `[4096]`。按源码 API 顺序这两个辅助输入是 `scale` 和 `offset`，工具会推断为 `int8`、`full_quant_with_dequant`、`per_channel_n`。
 
 ## 诊断标签
 
@@ -288,6 +288,7 @@ quant_compute_us =
 - `al1_full_load`、`bl1_full_load`：当前 V3 规格进入 L1 full-load 模板。
 - `fixpipe_output`：advanced tiling 判断输出走 fixpipe 优化。
 - `full_quant_dequant`：低 bit matmul 后接浮点输出转换。
+- `weight_only_quant`、`weight_only_quant_dequant`：weight-only quant matmul 路径。
 - `fake_or_mixed_quant`：伪量化或混合量化路径。
 - `weight_nz`：B 为 `FRACTAL_NZ`。
 - `fractal_nz`：A 或 output 为 `FRACTAL_NZ`。
@@ -372,7 +373,7 @@ Output dtype = FLOAT16
 M=4096, N=4096, K=12800
 quant_mode = int8
 quant_compute_path = full_quant_with_dequant
-quant_granularity = per_channel_n_or_per_token_m
+quant_granularity = per_channel_n
 median actual / estimate ~= 1.00
 median absolute percentage error ~= 1.0%
 ```

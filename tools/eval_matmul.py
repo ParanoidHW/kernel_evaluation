@@ -26,9 +26,19 @@ DTYPE_BYTES = {
     "INT8": 1,
     "DT_INT8": 1,
     "UINT8": 1,
+    "INT32": 4,
+    "DT_INT32": 4,
+    "INT64": 8,
+    "UINT64": 8,
     "INT4": 1,
     "UINT4": 1,
+    "FLOAT4": 1,
+    "FLOAT4_E2M1": 1,
     "FLOAT8": 1,
+    "FLOAT8_E4M3FN": 1,
+    "FLOAT8_E5M2": 1,
+    "HIFLOAT8": 1,
+    "HIF8": 1,
     "FP8": 1,
     "MXFP8": 1,
 }
@@ -39,7 +49,13 @@ DTYPE_BITS = {
     "INT8": 8,
     "DT_INT8": 8,
     "UINT8": 8,
+    "FLOAT4": 4,
+    "FLOAT4_E2M1": 4,
     "FLOAT8": 8,
+    "FLOAT8_E4M3FN": 8,
+    "FLOAT8_E5M2": 8,
+    "HIFLOAT8": 8,
+    "HIF8": 8,
     "FP8": 8,
     "MXFP8": 8,
 }
@@ -450,7 +466,21 @@ def dtype_bitwidth(dtype: str) -> int:
 
 def is_quantized_data_dtype(dtype: str) -> bool:
     normalized = dtype.upper().replace("DT_", "")
-    return normalized in {"INT4", "UINT4", "INT8", "UINT8", "FLOAT8", "FP8", "MXFP8"}
+    return normalized in {
+        "INT4",
+        "UINT4",
+        "INT8",
+        "UINT8",
+        "FLOAT4",
+        "FLOAT4_E2M1",
+        "FLOAT8",
+        "FLOAT8_E4M3FN",
+        "FLOAT8_E5M2",
+        "HIFLOAT8",
+        "HIF8",
+        "FP8",
+        "MXFP8",
+    }
 
 
 def is_scale_dtype(dtype: str) -> bool:
@@ -1894,11 +1924,23 @@ def infer_quant_spec(
 
     quant_data_inputs = sum(1 for dtype in (a_dtype, b_dtype) if is_quantized_data_dtype(dtype))
     has_scale = any(is_scale_dtype(dtype) for dtype in aux_dtypes)
-    has_fp8 = any(dtype.upper().replace("DT_", "") in {"FLOAT8", "FP8", "MXFP8"} for dtype in input_dtypes)
-    mode = "mxfp8" if has_fp8 else "int"
-    mode += f"{min(dtype_bitwidth(a_dtype), dtype_bitwidth(b_dtype))}"
+    input_type_names = [dtype.upper().replace("DT_", "") for dtype in input_dtypes]
+    min_data_bits = min(dtype_bitwidth(a_dtype), dtype_bitwidth(b_dtype))
+    if any(dtype in {"MXFP8", "HIFLOAT8", "HIF8"} for dtype in input_type_names):
+        mode = "mxfp8"
+    elif any(dtype in {"FLOAT8", "FLOAT8_E4M3FN", "FLOAT8_E5M2", "FP8"} for dtype in input_type_names):
+        mode = "fp8"
+    elif any(dtype in {"FLOAT4", "FLOAT4_E2M1"} for dtype in input_type_names):
+        mode = "float4"
+    else:
+        mode = f"int{min_data_bits}"
 
-    if quant_data_inputs == 2 and has_scale and output_dtype in {"FLOAT16", "DT_FLOAT16", "DT_BF16", "BFLOAT16", "FLOAT", "DT_FLOAT"}:
+    kernel_type_lower = kernel_type.lower()
+    if "weightquant" in kernel_type_lower and quant_data_inputs >= 1 and has_scale:
+        compute_path = "weight_only_quant_with_dequant"
+    elif "weightquant" in kernel_type_lower and quant_data_inputs >= 1:
+        compute_path = "weight_only_quant"
+    elif quant_data_inputs == 2 and has_scale and output_dtype in {"FLOAT16", "DT_FLOAT16", "DT_BF16", "BFLOAT16", "FLOAT", "DT_FLOAT"}:
         compute_path = "full_quant_with_dequant"
     elif quant_data_inputs == 2:
         compute_path = "full_quant"
@@ -1907,7 +1949,24 @@ def infer_quant_spec(
 
     granularity = "unknown"
     notes: list[str] = []
+    is_qbm_v3 = "quantbatchmatmulv3" in kernel_type_lower or "quantmatmulv3" in kernel_type_lower
+    if is_qbm_v3:
+        scale_shape = aux_shapes[0] if aux_shapes else []
+        pertoken_shape = aux_shapes[3] if len(aux_shapes) >= 4 else []
+        scale_is_channel = len(scale_shape) == 1 and scale_shape[0] in {1, spec.n}
+        pertoken_is_m = len(pertoken_shape) == 1 and pertoken_shape[0] in {spec.m, spec.batch * spec.m}
+        if pertoken_is_m and scale_is_channel:
+            granularity = "per_token_per_channel"
+        elif pertoken_is_m:
+            granularity = "per_token_m"
+        elif scale_is_channel:
+            granularity = "per_channel_n" if scale_shape[0] == spec.n else "per_tensor"
+        if granularity != "unknown":
+            notes.append("qbm_v3_scale_offset_order")
+
     for shape in aux_shapes:
+        if is_qbm_v3 and granularity != "unknown":
+            break
         if len(shape) == 1:
             dim = shape[0]
             if dim == spec.n and dim != spec.m:
@@ -1937,6 +1996,8 @@ def infer_quant_spec(
         notes.append("scale_dtype_present_but_granularity_unknown")
     if compute_path.startswith("full_quant") and has_scale:
         notes.append("int_accumulate_then_dequant")
+    if compute_path.startswith("weight_only_quant"):
+        notes.append("weight_dequant_on_matmul_path")
 
     deduped_notes = list(dict.fromkeys(notes))
     return QuantSpec(
@@ -2006,7 +2067,11 @@ def estimate_quant_cost(
         compute_us = tile.aligned_flops * op_factor / (float(peak_tops) * 1_000_000.0 * tile.core_efficiency * efficiency)
 
     dequant_per_elem_us = float(quant_cfg.get("dequant_us_per_output_element", 0.0))
-    dequant_us = output_elements * dequant_per_elem_us if quant_spec.compute_path == "full_quant_with_dequant" else 0.0
+    dequant_us = (
+        output_elements * dequant_per_elem_us
+        if quant_spec.compute_path in {"full_quant_with_dequant", "weight_only_quant_with_dequant"}
+        else 0.0
+    )
     if compute_us is not None:
         compute_us += dequant_us
 
@@ -2031,6 +2096,10 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         tags.append("quant_matmul")
     if row.get("quant_compute_path") == "full_quant_with_dequant":
         tags.append("full_quant_dequant")
+    elif row.get("quant_compute_path") == "weight_only_quant_with_dequant":
+        tags.append("weight_only_quant_dequant")
+    elif row.get("quant_compute_path") == "weight_only_quant":
+        tags.append("weight_only_quant")
     elif row.get("quant_compute_path") == "fake_quant_or_mixed":
         tags.append("fake_or_mixed_quant")
     if row["b_format"] == "FRACTAL_NZ":
