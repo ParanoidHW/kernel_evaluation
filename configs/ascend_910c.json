@@ -18,6 +18,29 @@
   "l2_bytes": 201326592,
   "ub_bytes": 196608,
   "bt_bytes": 4096,
+  "kernel_model": {
+    "runtime_kb": {
+      "enabled": true,
+      "matmul_v3_paths": [
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910_93/Ascend910_9381_24_AiCore_MatMulV3_runtime_kb.json",
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910_93/Ascend910_9382_24_AiCore_MatMulV3_runtime_kb.json",
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910_93/Ascend910_9391_24_AiCore_MatMulV3_runtime_kb.json",
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910_93/Ascend910_9392_24_AiCore_MatMulV3_runtime_kb.json"
+      ]
+    },
+    "advanced_tiling": {
+      "enabled": true,
+      "arch": "DAV_3510",
+      "applies_to": [
+        "MatMulV3",
+        "BatchMatMulV3"
+      ],
+      "core_freq_ghz": 1.65,
+      "l2_rate": 100.0,
+      "stream_k_reduction_traffic_factor": 0.25,
+      "notes": "910C is modeled as an ascend910_93/DAV_3510-style target; advanced_tiling_heuristic is used when runtime_kb has no exact match."
+    }
+  },
   "peak_tflops": {
     "FLOAT16": 400.0,
     "DT_BF16": 400.0,

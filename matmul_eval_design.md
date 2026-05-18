@@ -201,6 +201,39 @@ HBM bytes are L2-aware:
 - If `gm_bytes_min <= l2_bytes`, repeated tile reads are treated as L2 hits and `gm_bytes_min` is used.
 - Otherwise, deterministic L2 pressure is applied to a portion of `gm_bytes_tiled_raw - gm_bytes_min`.
 
+## Kernel Implementation Integration
+
+The evaluator now separates three tiling sources:
+
+- `runtime_kb_exact`: exact single-batch ops-nn `MatMulV3` hits from runtime knowledge-base files.
+- `advanced_tiling_heuristic`: ops-nn `MatMulV3` / `BatchMatMulV3` when advanced tiling is enabled.
+- `analytic_search`: non-V3 kernels, the 910B4 non-advanced path, and the base tile model for quant kernels.
+
+`runtime_kb` files are parsed as JSON Lines. The lookup key follows the source `info_dict`: A/B/C dtype, format, aligned `M/N/K`, alignment flags, transpose flags, and bias flag. BF16 is normalized to the FLOAT16 runtime-kb dtype code, matching the host code. K alignment is 8 for FP32 and 16 for FP16/BF16. Exact hits consume `knowledge` fields such as `baseM/baseN/baseK/singleCoreM/singleCoreN/singleCoreK/usedCoreNum/depthA1/depthB1/stepKa/stepKb/l2MTileCnt/l2NTileCnt`, and decode `tilingEnable` as:
+
+```text
+ones      = split-core template
+tens      = AL1/BL1 full-load template
+thousands = fixpipe/output optimization
+ten-thousands = special optimization
+```
+
+The 910C config models `ascend910_93` / `DAV_3510` advanced tiling. The 910B4 config disables advanced tiling because the checked-in ops-nn source routes 910B4 through the non-advanced host tiling path. The advanced path implements the main source decisions:
+
+- `MatMulV3`: checks Stream-K first, then Basic ASWT; starts from `baseM=256/baseN=256/baseK=128B/dtype`, derives `baseK/depth/step` from L0/L1 constraints, and applies source-style AL1/BL1 full-load and `L0C2Out` checks.
+- `BatchMatMulV3`: checks batch Stream-K first, then approximates `GetRebalanceBlock` with HBM/L2/core-frequency cube-bound edge and tail-balance scoring.
+- `Stream-K`: uses the source thresholds for small-MN large-K cases and optionally charges a configurable partial-C/reduction traffic factor.
+
+New report fields explain the current kernel:
+
+- `kernel_tiling_source`, `tiling_strategy`, `full_load`, `l0c2out`.
+- `base_m/base_n/base_k`, `depth_a1/depth_b1`, `step_m/step_n/step_ka/step_kb`.
+- `runtime_kb_id/runtime_kb_file` and decoded `tiling_split_core/tiling_full_load/tiling_fix_opti/tiling_special_opti`.
+- `current_kernel_bound_us/current_theoretical_tflops`: theoretical bound of the current kernel tiling.
+- `ideal_lower_bound_us/ideal_tflops`: physical lower bound without tiling padding, repeated traffic, or launch overhead.
+- `best_kernel_us/best_kernel_tflops`: best reachable estimate after adding global launch/pipeline terms to the ideal bound.
+- `kernel_gap_to_best/current_gap_to_ideal/bottleneck`: gap and dominant limiting component.
+
 ## Quant Matmul Handling
 
 Quantized matmul rows use a dedicated path instead of the normal floating-point model. A row is considered quantized if the kernel type contains `Quant` or if A/B input dtypes are low-bit data types such as `INT8`, `INT4`, or `MXFP8`.
@@ -247,6 +280,11 @@ For the current `QuantBatchMatmulV3` samples, the inputs are `INT8;INT8;FLOAT;FL
 The output includes diagnosis tags:
 
 - `quant_matmul`: quantized matmul path is used.
+- `runtime_kb_exact`: exact runtime-kb tiling is used.
+- `advanced_tiling_heuristic`: source-constrained advanced tiling estimate is used.
+- `stream_k`: the current V3 spec uses a Stream-K template.
+- `al1_full_load`, `bl1_full_load`: the current V3 spec uses an L1 full-load template.
+- `fixpipe_output`: advanced tiling predicts a fixpipe output path.
 - `full_quant_dequant`: low-bit matmul with floating output conversion.
 - `fake_or_mixed_quant`: ambiguous or mixed quantization path.
 - `weight_nz`: B is `FRACTAL_NZ`.
@@ -312,7 +350,10 @@ unresolved_rows = 0
 MatMulV2 rows = 416
 MatMulV3 rows = 256
 MatMulV2 median actual / estimate ~= 1.05
-MatMulV3 median actual / estimate ~= 1.03
+MatMulV3 median actual / estimate ~= 0.98
+MatMulV3 tiling source = advanced_tiling_heuristic
+MatMulV2 tiling source = analytic_search
+MatMulV3 median current_gap_to_ideal ~= 1.04
 ```
 
 The previous three unresolved rows were `ND;FRACTAL_NZ` weight-NZ rows. They now resolve to:
@@ -381,7 +422,9 @@ Optional flags:
 
 ## Known Limitations
 
-- The model is not a CANN tiling implementation. It approximates kernel behavior with deterministic constraints.
+- The model is not a CANN tiling implementation. It approximates kernel behavior with deterministic constraints; only `runtime_kb_exact` hits are direct reads of source-generated tiling knowledge.
+- Current 910C MatMulV3 profiling shapes do not hit runtime_kb exactly, so they use `advanced_tiling_heuristic`.
+- `BatchMatMulV3` advanced full-load / iter-batch / merge-batch paths are still approximate and should be refined when matching profiling examples are available.
 - GMM is excluded by default and is not modeled as grouped expert GEMM.
 - AllGatherMatmul communication is excluded by default.
 - Cache sizes and peak TFLOPS are configurable assumptions unless official target-specific values are supplied.

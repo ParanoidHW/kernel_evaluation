@@ -18,6 +18,23 @@
   "l2_bytes": 201326592,
   "ub_bytes": 196608,
   "bt_bytes": 4096,
+  "kernel_model": {
+    "runtime_kb": {
+      "enabled": true,
+      "matmul_v3_paths": [
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910b/Ascend910B4_20_AiCore_MatMulV3_runtime_kb.json"
+      ]
+    },
+    "advanced_tiling": {
+      "enabled": false,
+      "arch": "non_advanced_ascend910b",
+      "applies_to": [
+        "MatMulV3",
+        "BatchMatMulV3"
+      ],
+      "notes": "910B4 uses the non-advanced host tiling path in the checked-in ops-nn source; runtime_kb exact hits are used when available."
+    }
+  },
   "peak_tflops": {
     "FLOAT16": 240.0,
     "DT_BF16": 240.0,

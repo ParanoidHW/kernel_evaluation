@@ -203,6 +203,39 @@ HBM 估算考虑 L2：
 - 如果 `gm_bytes_min <= l2_bytes`，重复 tile 读取视为 L2 命中，HBM 使用 `gm_bytes_min`。
 - 如果超过 L2，则对 `gm_bytes_tiled_raw - gm_bytes_min` 的冗余流量施加一个确定性的 L2 pressure 项。
 
+## Kernel 实现集成
+
+工具现在区分三类 tiling 来源：
+
+- `runtime_kb_exact`：只用于 ops-nn `MatMulV3` 的单 batch 精确命中。
+- `advanced_tiling_heuristic`：只用于开启 advanced tiling 的 ops-nn `MatMulV3` / `BatchMatMulV3`。
+- `analytic_search`：用于非 V3 kernel、910B4 非 advanced 路径、量化 kernel 的基础 tile 估算。
+
+`runtime_kb` 文件按 JSON Lines 解析，key 来自源码中的 `info_dict` 规格：A/B/C dtype、format、对齐后的 `M/N/K`、对齐 flag、转置 flag 和 bias flag。BF16 按源码行为归一到 FLOAT16 code；FP32 的 K 对齐按 8，FP16/BF16 按 16。精确命中后直接读取 `knowledge` 中的 `baseM/baseN/baseK/singleCoreM/singleCoreN/singleCoreK/usedCoreNum/depthA1/depthB1/stepKa/stepKb/l2MTileCnt/l2NTileCnt`，并解码 `tilingEnable`：
+
+```text
+个位   = split-core 模板
+十位   = AL1/BL1 full-load 模板
+千位   = fixpipe/output 优化
+万位   = special opti
+```
+
+910C 配置按 `ascend910_93` / `DAV_3510` 处理 advanced tiling；910B4 配置关闭 advanced tiling，因为当前 ops-nn 源码中 910B4 走非 advanced host tiling 路径。advanced 路径实现了源码中的主要决策：
+
+- `MatMulV3`：先检查 Stream-K 条件，再走 Basic ASWT；默认 `baseM=256/baseN=256/baseK=128B/dtype`，按 L0/L1 约束计算 `baseK/depth/step`，并按源码条件判断 AL1/BL1 full-load 和 `L0C2Out`。
+- `BatchMatMulV3`：先检查 batch Stream-K，再用 `GetRebalanceBlock` 的核心思想做 ASW rebalance：使用 HBM/L2/core-freq 估算 cube-bound edge，结合尾块负载均衡选择 `baseM/baseN/baseK`。
+- `Stream-K`：对小 MN、大 K 场景按源码阈值建模，并额外计入可配置的 partial-C/reduction 流量因子。
+
+新增输出字段用于解释当前 kernel：
+
+- `kernel_tiling_source`、`tiling_strategy`、`full_load`、`l0c2out`。
+- `base_m/base_n/base_k`、`depth_a1/depth_b1`、`step_m/step_n/step_ka/step_kb`。
+- `runtime_kb_id/runtime_kb_file` 和解码后的 `tiling_split_core/tiling_full_load/tiling_fix_opti/tiling_special_opti`。
+- `current_kernel_bound_us/current_theoretical_tflops`：按当前 kernel tiling 的理论下界。
+- `ideal_lower_bound_us/ideal_tflops`：不考虑 tiling padding、重复搬运和启动开销的物理下界。
+- `best_kernel_us/best_kernel_tflops`：在理想 kernel 下界上加全局启动/流水项后的最优可达估计。
+- `kernel_gap_to_best/current_gap_to_ideal/bottleneck`：当前 kernel 与最优/理想下界的差距和主导瓶颈。
+
 ## Quant Matmul 处理
 
 量化 matmul 使用独立路径，不再沿用普通浮点 matmul 模型。满足以下任一条件就会进入量化路径：kernel type 中包含 `Quant`，或者 A/B 输入 dtype 是 `INT8`、`INT4`、`MXFP8` 等低 bit 数据类型。
@@ -249,6 +282,11 @@ quant_compute_us =
 输出中的 `diagnosis` 会包含以下标签：
 
 - `quant_matmul`：使用了量化 matmul 路径。
+- `runtime_kb_exact`：使用 runtime_kb 精确 tiling。
+- `advanced_tiling_heuristic`：使用源码约束的 advanced tiling 估算。
+- `stream_k`：当前 V3 规格满足 Stream-K 模板。
+- `al1_full_load`、`bl1_full_load`：当前 V3 规格进入 L1 full-load 模板。
+- `fixpipe_output`：advanced tiling 判断输出走 fixpipe 优化。
 - `full_quant_dequant`：低 bit matmul 后接浮点输出转换。
 - `fake_or_mixed_quant`：伪量化或混合量化路径。
 - `weight_nz`：B 为 `FRACTAL_NZ`。
@@ -308,7 +346,10 @@ unresolved_rows = 0
 MatMulV2 rows = 416
 MatMulV3 rows = 256
 MatMulV2 median actual / estimate ~= 1.05
-MatMulV3 median actual / estimate ~= 1.03
+MatMulV3 median actual / estimate ~= 0.98
+MatMulV3 tiling source = advanced_tiling_heuristic
+MatMulV2 tiling source = analytic_search
+MatMulV3 median current_gap_to_ideal ~= 1.04
 ```
 
 原先 3 条 unresolved 都是 `ND;FRACTAL_NZ` Weight-NZ 行，现在解析为：
@@ -377,7 +418,9 @@ python3 tools/eval_matmul.py \
 
 ## 已知限制
 
-- 该模型不是 CANN tiling 的完整复刻，而是用确定性约束近似 kernel 行为。
+- 该模型不是 CANN tiling 的完整复刻，而是用确定性约束近似 kernel 行为；`runtime_kb_exact` 命中时才等价于读取源码生成的精确 tiling 知识。
+- 当前 profiling 中的 910C MatMulV3 shape 没有 runtime_kb 精确命中，因此使用 `advanced_tiling_heuristic`。
+- `BatchMatMulV3` advanced full-load/iter-batch/merge-batch 特殊路径仍是近似，后续如果有对应 profiling 样例应继续细化。
 - GMM 默认排除，当前没有按 grouped expert GEMM 建模。
 - AllGatherMatmul 默认排除，当前不建模通信。
 - cache 大小和峰值 TFLOPS 当前是配置假设，拿到官方目标硬件数据后应更新配置。
