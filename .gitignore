@@ -5,8 +5,11 @@
 
 # Generated evaluator outputs.
 /matmul_eval_report.csv
+/matmul_eval_report_*.csv
 /matmul_eval_unresolved.csv
+/matmul_eval_unresolved_*.csv
 /matmul_eval_calibration_suggested.json
+/matmul_eval_calibration_suggested_*.json
 
 # Python caches.
 __pycache__/

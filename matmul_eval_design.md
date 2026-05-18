@@ -2,10 +2,12 @@
 
 ## Scope
 
-This tool evaluates Ascend 910B4 matmul kernels from exported profiling CSV files. The current implementation targets:
+This tool evaluates Ascend matmul kernels from exported profiling CSV files. The current implementation targets:
 
-- Hardware: Ascend 910B4.
-- HBM bandwidth: 0.8 TB/s.
+- Hardware configs: Ascend 910B4 and Ascend 910C.
+- 910B4 HBM bandwidth: 0.8 TB/s.
+- 910C HBM bandwidth: 1.6 TB/s.
+- 910C BF16/FP16 peak: 400 TFLOPS for the visible device.
 - HF32: disabled / not used.
 - Included by default: `MatMul`, `MatMulV2`, `MatMulV3`, `BatchMatMulV2`.
 - Excluded by default: `GroupedMatmul` and `AllGatherMatmul`.
@@ -26,13 +28,16 @@ This keeps the output explainable and avoids fitting shape-specific coefficients
 
 ## Hardware Configuration
 
-Configuration is stored in `configs/ascend_910b4.json`.
+Configuration is stored per hardware target:
+
+- `configs/ascend_910b4.json`: 20 AI Cores, 0.8 TB/s HBM, no-HF32 BF16/FP16 peak 240 TFLOPS.
+- `configs/ascend_910c.json`: 24 AI Cores inferred from the 910C profiling block dim, 1.6 TB/s HBM, no-HF32 BF16/FP16 peak 400 TFLOPS.
 
 Known or user-supplied fields:
 
-- `aic_num`: AI Core count. Current profiling shows AI_CORE matmul `Block Dim` around 20, so the default is 20.
-- `aiv_num`: Vector core count. Default is 40.
-- `hbm_bandwidth_tbps`: 0.8.
+- `aic_num`: AI Core count used for tile/core-efficiency modeling.
+- `aiv_num`: Vector core count.
+- `hbm_bandwidth_tbps`: HBM bandwidth in TB/s.
 
 Configurable assumptions:
 
@@ -40,7 +45,7 @@ Configurable assumptions:
 - `peak_tflops`: dtype-specific no-HF32 peak throughput.
 - `calibration`: global launch overhead, pipeline efficiency, and optional format-conversion overhead.
 
-These fields should be updated if reliable CANN platform configuration or official 910B4 numbers become available.
+These fields should be updated if reliable CANN platform configuration or official target-specific numbers become available.
 
 ## Profiling Extraction
 
@@ -279,17 +284,35 @@ Launch overhead is already part of the estimate:
 estimated_us = launch_overhead_us + kernel_bound_us + format_overhead_us
 ```
 
-The default config keeps launch overhead at `0.0` because it is platform/runtime dependent. For very small shapes, this term can dominate; use `--suggest-calibration` to get initial values such as `MatMul`, `MatMulV2`, or `BatchMatMul`, then copy them into `configs/ascend_910b4.json::calibration.launch_overhead_us_by_type`.
+Launch overhead fitting is global per kernel type, not shape-specific. The current helper uses low-tile-count rows and computes a low percentile of `duration_us - lower_bound_us`; this estimates an absolute launch/scheduling term and avoids absorbing cache misses or tail effects. Pipeline efficiency uses a high percentile of `achieved_tflops / peak_tflops` from large, high-cube-utilization rows.
+
+The current checked-in calibration values are:
+
+- 910B4 launch overhead: `BatchMatMul=2.35824us`, `MatMul=3.6392us`, `MatMulV2=3.1942us`.
+- 910B4 sustained efficiency: `DT_BF16=0.922814`, `FLOAT16=0.976532`, `FLOAT=0.99724`, quant `INT8=0.522674`.
+- 910C launch overhead: `MatMulV2=7.61184us`; `MatMulV3` remains `0.0` because the current 910C samples do not provide low-tile-count MatMulV3 calibration rows.
+- 910C sustained efficiency: `DT_BF16=0.772807`, using the user-specified 400 TFLOPS peak.
 
 Do not fit per-shape coefficients. If residuals are large, add an explainable term only when it maps to a kernel mechanism.
 
 ## Current Validation Snapshot
 
-With the current example profiling set:
+With the current 910B4 example profiling set:
 
 ```text
 resolved_matmul_rows = 1255
 unresolved_rows = 0
+```
+
+With the current 910C example profiling set and `configs/ascend_910c.json`:
+
+```text
+resolved_matmul_rows = 672
+unresolved_rows = 0
+MatMulV2 rows = 416
+MatMulV3 rows = 256
+MatMulV2 median actual / estimate ~= 1.05
+MatMulV3 median actual / estimate ~= 1.03
 ```
 
 The previous three unresolved rows were `ND;FRACTAL_NZ` weight-NZ rows. They now resolve to:
@@ -297,7 +320,7 @@ The previous three unresolved rows were `ND;FRACTAL_NZ` weight-NZ rows. They now
 ```text
 M=1, N=32768, K=2816, batch=1
 B_storage_elements = 2048 * 176 * 16 * 16 = 92274688
-estimated_us ~= 230.8
+estimated_us ~= 234.4
 measured_us ~= 246-248
 diagnosis = weight_nz|small_m_overhead|memory_bound
 ```
@@ -313,30 +336,42 @@ M=4096, N=4096, K=12800
 quant_mode = int8
 quant_compute_path = full_quant_with_dequant
 quant_granularity = per_channel_n_or_per_token_m
-median actual / estimate ~= 1.15
-median absolute percentage error ~= 12.9%
+median actual / estimate ~= 1.00
+median absolute percentage error ~= 1.0%
 ```
 
 ## CLI
 
-Default report:
+Run one SoC directory with the matching config. Directory inputs are scanned recursively, so passing the top-level `example_profilings` directory would mix 910B4 and 910C rows under one hardware config.
+
+910B4 report:
 
 ```bash
 python3 tools/eval_matmul.py \
-  --profiling example_profilings \
+  --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
-  --output matmul_eval_report.csv \
-  --unresolved-output matmul_eval_unresolved.csv
+  --output matmul_eval_report_910b4.csv \
+  --unresolved-output matmul_eval_unresolved_910b4.csv
 ```
 
-Calibration suggestions:
+910C report:
 
 ```bash
 python3 tools/eval_matmul.py \
-  --profiling example_profilings \
+  --profiling example_profilings/910C \
+  --config configs/ascend_910c.json \
+  --output matmul_eval_report_910c.csv \
+  --unresolved-output matmul_eval_unresolved_910c.csv
+```
+
+Calibration suggestions should be generated against the matching SoC directory and config:
+
+```bash
+python3 tools/eval_matmul.py \
+  --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --suggest-calibration \
-  --calibration-output matmul_eval_calibration_suggested.json
+  --calibration-output matmul_eval_calibration_suggested_910b4.json
 ```
 
 Optional flags:
@@ -349,7 +384,7 @@ Optional flags:
 - The model is not a CANN tiling implementation. It approximates kernel behavior with deterministic constraints.
 - GMM is excluded by default and is not modeled as grouped expert GEMM.
 - AllGatherMatmul communication is excluded by default.
-- Cache sizes and peak TFLOPS are configurable assumptions unless official 910B4 values are supplied.
+- Cache sizes and peak TFLOPS are configurable assumptions unless official target-specific values are supplied.
 - Runtime ND2NZ detection currently uses MatMulV3-style conditions for all included rows; BatchMatMulV3-specific multi-batch paths may need refinement if those rows become important.
 - Quant matmul support is mode-aware but still relies on effective `peak_tops` and pipeline parameters. More quantization modes, especially MXFP8 and per-group variants, need additional profiling examples to validate.
 - If profiling exports origin shapes instead of storage shapes for `FRACTAL_NZ`, the current NZ inference would need additional metadata.

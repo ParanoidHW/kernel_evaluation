@@ -2,10 +2,12 @@
 
 ## 范围
 
-该工具用于分析 Ascend 910B4 上导出的 profiling CSV，并对 matmul 类 kernel 的实际开销进行可解释估算。当前实现范围：
+该工具用于分析 Ascend 上导出的 profiling CSV，并对 matmul 类 kernel 的实际开销进行可解释估算。当前实现范围：
 
-- 硬件：Ascend 910B4。
-- HBM 带宽：0.8 TB/s。
+- 硬件配置：Ascend 910B4 和 Ascend 910C。
+- 910B4 HBM 带宽：0.8 TB/s。
+- 910C HBM 带宽：1.6 TB/s。
+- 910C BF16/FP16 峰值：按可见设备 400 TFLOPS。
 - HF32：不启用。
 - 默认纳入：`MatMul`、`MatMulV2`、`MatMulV3`、`BatchMatMulV2`。
 - 默认排除：`GroupedMatmul`、`AllGatherMatmul`。
@@ -26,13 +28,16 @@
 
 ## 硬件配置
 
-配置文件为 `configs/ascend_910b4.json`。
+配置文件按硬件目标拆分：
+
+- `configs/ascend_910b4.json`：20 个 AI Core，0.8 TB/s HBM，无 HF32 BF16/FP16 峰值 240 TFLOPS。
+- `configs/ascend_910c.json`：从 910C profiling 的 Block Dim 推断 24 个 AI Core，1.6 TB/s HBM，无 HF32 BF16/FP16 峰值 400 TFLOPS。
 
 当前已知或用户给定的信息：
 
-- `aic_num`：AI Core 数。当前 profiling 中 AI_CORE matmul 的 `Block Dim` 约为 20，因此默认取 20。
-- `aiv_num`：Vector Core 数。默认取 40。
-- `hbm_bandwidth_tbps`：0.8。
+- `aic_num`：用于 tile/core-efficiency 建模的 AI Core 数。
+- `aiv_num`：Vector Core 数。
+- `hbm_bandwidth_tbps`：HBM 带宽，单位 TB/s。
 
 当前可调整的假设：
 
@@ -40,7 +45,7 @@
 - `peak_tflops`：无 HF32 时各 dtype 的理论峰值。
 - `calibration`：kernel 启动开销、流水效率、可选格式转换开销。
 
-如果后续能拿到可靠的 CANN platform 配置或官方 910B4 指标，应优先更新这些配置项，而不是修改模型逻辑。
+如果后续能拿到可靠的 CANN platform 配置或官方目标硬件指标，应优先更新这些配置项，而不是修改模型逻辑。
 
 ## Profiling 提取
 
@@ -275,15 +280,35 @@ quant_compute_us =
 - 启动开销来自低 tile 数残差的低分位数。
 - 流水效率来自大 shape、高 cube 利用率样本的高分位数。
 
+启动开销拟合是按 kernel type 的全局项，不是 per-shape 曲线。当前逻辑在低 tile 数样本中计算 `duration_us - lower_bound_us` 的低分位数，得到绝对启动/调度开销；低分位数用于避免把 cache miss、tail 或非典型访存误吸收到启动开销里。流水效率则使用大 shape、高 cube 利用率样本的 `achieved_tflops / peak_tflops` 高分位数。
+
+当前已写入配置的校准值：
+
+- 910B4 启动开销：`BatchMatMul=2.35824us`、`MatMul=3.6392us`、`MatMulV2=3.1942us`。
+- 910B4 持续效率：`DT_BF16=0.922814`、`FLOAT16=0.976532`、`FLOAT=0.99724`、量化 `INT8=0.522674`。
+- 910C 启动开销：`MatMulV2=7.61184us`；当前 910C 样例没有低 tile 数 `MatMulV3` 校准行，因此 `MatMulV3` 仍为 `0.0`。
+- 910C 持续效率：`DT_BF16=0.772807`，基于用户指定的 400 TFLOPS 峰值。
+
 不要拟合 per-shape 系数。如果残差很大，应优先找对应的 kernel 机制，例如 tail imbalance、运行时格式转换、非连续输入、通信融合或 GMM 语义，而不是直接加经验曲线。
 
 ## 当前验证结果
 
-当前 profiling 样例验证结果：
+当前 910B4 profiling 样例验证结果：
 
 ```text
 resolved_matmul_rows = 1255
 unresolved_rows = 0
+```
+
+当前 910C profiling 样例使用 `configs/ascend_910c.json` 的验证结果：
+
+```text
+resolved_matmul_rows = 672
+unresolved_rows = 0
+MatMulV2 rows = 416
+MatMulV3 rows = 256
+MatMulV2 median actual / estimate ~= 1.05
+MatMulV3 median actual / estimate ~= 1.03
 ```
 
 原先 3 条 unresolved 都是 `ND;FRACTAL_NZ` Weight-NZ 行，现在解析为：
@@ -291,7 +316,7 @@ unresolved_rows = 0
 ```text
 M=1, N=32768, K=2816, batch=1
 B_storage_elements = 2048 * 176 * 16 * 16 = 92274688
-estimated_us ~= 230.8
+estimated_us ~= 234.4
 measured_us ~= 246-248
 diagnosis = weight_nz|small_m_overhead|memory_bound
 ```
@@ -307,30 +332,42 @@ M=4096, N=4096, K=12800
 quant_mode = int8
 quant_compute_path = full_quant_with_dequant
 quant_granularity = per_channel_n_or_per_token_m
-median actual / estimate ~= 1.15
-median absolute percentage error ~= 12.9%
+median actual / estimate ~= 1.00
+median absolute percentage error ~= 1.0%
 ```
 
 ## CLI
 
-默认报告：
+每次运行应使用一个 SoC 目录和匹配配置。目录输入会递归扫描，因此直接传顶层 `example_profilings` 会把 910B4/910C 行混到同一套硬件配置下。
+
+910B4 报告：
 
 ```bash
 python3 tools/eval_matmul.py \
-  --profiling example_profilings \
+  --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
-  --output matmul_eval_report.csv \
-  --unresolved-output matmul_eval_unresolved.csv
+  --output matmul_eval_report_910b4.csv \
+  --unresolved-output matmul_eval_unresolved_910b4.csv
 ```
 
-校准建议：
+910C 报告：
 
 ```bash
 python3 tools/eval_matmul.py \
-  --profiling example_profilings \
+  --profiling example_profilings/910C \
+  --config configs/ascend_910c.json \
+  --output matmul_eval_report_910c.csv \
+  --unresolved-output matmul_eval_unresolved_910c.csv
+```
+
+校准建议需要使用匹配的 SoC 目录和配置：
+
+```bash
+python3 tools/eval_matmul.py \
+  --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --suggest-calibration \
-  --calibration-output matmul_eval_calibration_suggested.json
+  --calibration-output matmul_eval_calibration_suggested_910b4.json
 ```
 
 可选参数：
@@ -343,7 +380,7 @@ python3 tools/eval_matmul.py \
 - 该模型不是 CANN tiling 的完整复刻，而是用确定性约束近似 kernel 行为。
 - GMM 默认排除，当前没有按 grouped expert GEMM 建模。
 - AllGatherMatmul 默认排除，当前不建模通信。
-- cache 大小和峰值 TFLOPS 当前是配置假设，拿到官方 910B4 数据后应更新配置。
+- cache 大小和峰值 TFLOPS 当前是配置假设，拿到官方目标硬件数据后应更新配置。
 - 运行时 ND2NZ 检测目前使用 MatMulV3 风格条件，对 BatchMatMulV3 的 multi-batch 特殊路径还可以进一步细化。
 - Quant matmul 支持会区分模式和粒度，但仍依赖有效 `peak_tops` 和 pipeline 参数。MXFP8、per-group 等更多量化模式需要更多 profiling 样例验证。
 - 如果 profiling 导出的 `FRACTAL_NZ` shape 不是 storage shape，而是 origin shape，则当前 NZ 还原规则需要额外元数据辅助。

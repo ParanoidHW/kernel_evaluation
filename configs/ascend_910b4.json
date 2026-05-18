@@ -35,7 +35,7 @@
     },
     "pipeline_efficiency": {
       "default": 0.60,
-      "INT8": 0.60,
+      "INT8": 0.522674,
       "INT4": 0.55,
       "MXFP8": 0.60
     },
@@ -50,19 +50,20 @@
   "calibration": {
     "launch_overhead_us_by_type": {
       "default": 0.0,
-      "MatMul": 0.0,
-      "MatMulV2": 0.0,
+      "BatchMatMul": 2.35824,
+      "MatMul": 3.6392,
+      "MatMulV2": 3.1942,
       "MatMulV3": 0.0,
       "BatchMatMulV2": 0.0,
       "QuantBatchMatmulV3": 0.0
     },
     "pipeline_efficiency_by_dtype": {
       "default": 1.0,
-      "FLOAT16": 1.0,
-      "DT_BF16": 1.0,
-      "BFLOAT16": 1.0,
-      "FLOAT": 1.0,
-      "FLOAT32": 1.0
+      "FLOAT16": 0.976532,
+      "DT_BF16": 0.922814,
+      "BFLOAT16": 0.922814,
+      "FLOAT": 0.99724,
+      "FLOAT32": 0.99724
     },
     "format_overhead_us": {
       "default": 0.0,

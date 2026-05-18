@@ -823,12 +823,19 @@ def iter_input_files(inputs: list[str]) -> list[Path]:
     for item in inputs:
         path = Path(item)
         if path.is_dir():
-            files.extend(sorted(path.glob("*.csv")))
+            files.extend(sorted(path.rglob("*.csv")))
         elif path.is_file():
             files.append(path)
         else:
             raise FileNotFoundError(f"profiling path not found: {item}")
     return sorted(set(files))
+
+
+def display_path(path: Path) -> str:
+    try:
+        return path.relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def evaluate_file(
@@ -839,6 +846,7 @@ def evaluate_file(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
+    source_file = display_path(path)
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         for line_no, row in enumerate(reader, start=2):
@@ -855,7 +863,7 @@ def evaluate_file(
             if spec is None:
                 unresolved.append(
                     {
-                        "file": path.name,
+                        "file": source_file,
                         "line": line_no,
                         "type": row.get("Type", ""),
                         "name": row.get("Name", ""),
@@ -927,7 +935,7 @@ def evaluate_file(
             )
 
             result: dict[str, Any] = {
-                "file": path.name,
+                "file": source_file,
                 "line": line_no,
                 "name": row.get("Name", ""),
                 "type": kernel_type,
@@ -1158,8 +1166,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--profiling",
         nargs="+",
-        default=["example_profilings"],
-        help="Profiling CSV file(s) or directories. Default: example_profilings",
+        default=["example_profilings/910B4"],
+        help="Profiling CSV file(s) or directories. Default: example_profilings/910B4",
     )
     parser.add_argument(
         "--config",
