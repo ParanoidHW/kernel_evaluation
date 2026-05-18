@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate Ascend matmul profiling rows with a kernel-aware analytic model."""
+"""Evaluate operator profiling rows with kernel-aware analytic models."""
 
 from __future__ import annotations
 

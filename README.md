@@ -1,12 +1,13 @@
 # Kernel Evaluation
 
-This repository contains a small evaluator for estimating Ascend matmul kernel cost from exported profiling CSV files.
+This repository contains a small evaluator for estimating Ascend operator kernel cost from exported profiling CSV files. MatMul is the first implemented operator family.
 
 ## Scope
 
 - Hardware targets: Ascend 910B4 and Ascend 910C.
 - Profiling inputs: `example_profilings/910B4` and `example_profilings/910C`.
-- Main tool: `tools/eval_matmul.py`.
+- Main tool: `tools/eval_ops.py`.
+- Compatibility MatMul CLI: `tools/eval_matmul.py`.
 - Design notes: `matmul_eval_design.md` and `matmul_eval_design_zh.md`.
 
 ## Information Sources
@@ -22,6 +23,20 @@ This repository contains a small evaluator for estimating Ascend matmul kernel c
 
 The local ops-nn kernel code was taken from the upstream GitCode `cann/ops-nn` matmul tree. If the local snapshot and upstream diverge, prefer checking the exact upstream commit and then updating local source references deliberately.
 
+## Tool Layout
+
+- `tools/eval_ops.py`: generic operator profiling CLI entry point.
+- `tools/eval_matmul.py`: backward-compatible wrapper using the same generic CLI.
+- `tools/op_eval/common.py`: shared config, dtype, format, shape, and numeric helpers.
+- `tools/op_eval/profiling.py`: profiling CSV file discovery, default row filtering, and CSV report writing.
+- `tools/op_eval/api.py`: generic `estimate_op(...)` dispatcher for future operator families.
+- `tools/op_eval/cli.py`: shared CLI orchestration. It currently dispatches to MatMul evaluation.
+- `tools/matmul_eval/api.py`: public MatMul cost API, including `estimate_matmul(...)`.
+- `tools/matmul_eval/common.py`: MatMul specs, tile result structs, and MatMul shape inference.
+- `tools/matmul_eval/kernel_model.py`: MatMul tiling/runtime_kb/advanced_tiling/Stream-K/full-load model.
+- `tools/matmul_eval/quant_model.py`: low-bit MatMul mode, granularity, dequant, and traffic model.
+- `tools/matmul_eval/evaluator.py`: MatMul profiling-row evaluation, summaries, and calibration suggestions.
+
 ## Useful Upstream Operators
 
 The upstream `matmul` tree contains additional operator implementations that can refine this evaluator beyond plain MatMulV3:
@@ -35,10 +50,24 @@ The upstream `matmul` tree contains additional operator implementations that can
 
 ## Example Commands
 
+Single-kernel API:
+
+```bash
+PYTHONPATH=tools python3 -c 'from matmul_eval import estimate_matmul; r = estimate_matmul(1024, 4096, 4096, "DT_BF16", config_path="configs/ascend_910c.json"); print(r.flops_cost_us, r.memory_access_us, r.total_us, r.bound_type)'
+```
+
+Generic operator API:
+
+```bash
+PYTHONPATH=tools python3 -c 'from op_eval import estimate_op; r = estimate_op("MatMulV3", 1024, 4096, 4096, "DT_BF16", config_path="configs/ascend_910c.json"); print(r.to_dict())'
+```
+
+The stable public cost fields are `flops_cost_us`, `memory_access_us`, `total_us`, and `bound_type`. `bound_type` is the end-to-end dominant bound (`compute_bound`, `memory_access_bound`, `launch_bound`, `format_bound`, or `balanced_bound`); `kernel_bound_type` keeps the compute-vs-memory kernel-only classification.
+
 910B4:
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --output matmul_eval_report_910b4.csv \
@@ -48,7 +77,7 @@ python3 tools/eval_matmul.py \
 910C:
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910C \
   --config configs/ascend_910c.json \
   --output matmul_eval_report_910c.csv \
