@@ -53,6 +53,8 @@ For each included matmul row, the evaluator extracts:
 - Inferred GEMM: `M`, `N`, `K`, `batch`, `transA`, `transB`.
 - Storage metadata: normalized A/B/output formats and physical storage element counts.
 
+Rows are included by operator `Type`, not by `Name`. This intentionally excludes rows such as `Type=Mul` even if the profiling name contains `Matmul`.
+
 The parser does not assume B is always `[K,N]`. It searches `transA/transB` candidates and scores them against output shape.
 
 ## Shape And Format Inference
@@ -271,6 +273,14 @@ The helper suggestion logic is deliberately simple:
 - Launch overhead is estimated from low-tile-count residuals with a low percentile.
 - Pipeline efficiency is estimated from large, high-cube-utilization rows with a high percentile.
 
+Launch overhead is already part of the estimate:
+
+```text
+estimated_us = launch_overhead_us + kernel_bound_us + format_overhead_us
+```
+
+The default config keeps launch overhead at `0.0` because it is platform/runtime dependent. For very small shapes, this term can dominate; use `--suggest-calibration` to get initial values such as `MatMul`, `MatMulV2`, or `BatchMatMul`, then copy them into `configs/ascend_910b4.json::calibration.launch_overhead_us_by_type`.
+
 Do not fit per-shape coefficients. If residuals are large, add an explainable term only when it maps to a kernel mechanism.
 
 ## Current Validation Snapshot
@@ -278,7 +288,7 @@ Do not fit per-shape coefficients. If residuals are large, add an explainable te
 With the current example profiling set:
 
 ```text
-resolved_matmul_rows = 1256
+resolved_matmul_rows = 1255
 unresolved_rows = 0
 ```
 

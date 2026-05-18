@@ -341,7 +341,7 @@ def infer_standard_matmul(
 
 
 def is_matmul_row(row: dict[str, str]) -> bool:
-    text = f"{row.get('Name', '')} {row.get('Type', '')}".lower()
+    text = row.get("Type", "").lower()
     return any(token in text for token in ("matmul", "mat_mul", "batchmatmul", "bmm"))
 
 

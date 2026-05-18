@@ -55,6 +55,8 @@
 
 解析器不会假设 B 一定是 `[K,N]`。当前实现会枚举 `transA/transB`，并用 output shape 给候选打分。
 
+行过滤只根据算子 `Type` 判断是否属于 matmul，不使用 `Name`。这样会排除 `Type=Mul` 但名称中带有 `Matmul` 的 profiling 行，避免把 elementwise mul 误当作 matmul 评估。
+
 ## Shape 和 Format 推断
 
 format 先标准化：
@@ -155,6 +157,8 @@ hbm_us = gm_bytes_tiled / (hbm_bandwidth_tbps * 1e6)
 lower_bound_us = max(compute_us, hbm_us)
 estimated_us = launch_overhead_us + max(compute_us / pipeline_efficiency, hbm_us) + format_overhead_us
 ```
+
+`launch_overhead_us` 来自 `configs/ascend_910b4.json::calibration.launch_overhead_us_by_type`。当前默认值为 0.0，表示不把平台/运行时相关的固定开销硬编码进模型；对小规格或低 tile 数算子，应使用 `--suggest-calibration` 从低 tile 残差中得到初始估计，再写回配置。
 
 `storage_padding_ratio` 定义为：
 
@@ -278,7 +282,7 @@ quant_compute_us =
 当前 profiling 样例验证结果：
 
 ```text
-resolved_matmul_rows = 1256
+resolved_matmul_rows = 1255
 unresolved_rows = 0
 ```
 
