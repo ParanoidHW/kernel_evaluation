@@ -24,6 +24,24 @@ DTYPE_BYTES = {
     "FLOAT32": 4,
     "DT_FLOAT": 4,
     "INT8": 1,
+    "DT_INT8": 1,
+    "UINT8": 1,
+    "INT4": 1,
+    "UINT4": 1,
+    "FLOAT8": 1,
+    "FP8": 1,
+    "MXFP8": 1,
+}
+
+DTYPE_BITS = {
+    "INT4": 4,
+    "UINT4": 4,
+    "INT8": 8,
+    "DT_INT8": 8,
+    "UINT8": 8,
+    "FLOAT8": 8,
+    "FP8": 8,
+    "MXFP8": 8,
 }
 
 
@@ -64,6 +82,17 @@ class TileEstimate:
     compute_us: float | None
     hbm_us: float
     lower_bound_us: float
+
+
+@dataclass(frozen=True)
+class QuantSpec:
+    is_quant: bool
+    mode: str = "none"
+    granularity: str = "none"
+    compute_path: str = "non_quant"
+    aux_elements: int = 0
+    aux_bytes: int = 0
+    notes: str = ""
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -329,6 +358,8 @@ def dtype_from_row(row: dict[str, str]) -> str:
     parts = [part for part in row.get("Input Data Types", "").split(";") if part]
     if not parts:
         return "UNKNOWN"
+    if is_quant_kernel_type(row.get("Type", "")) and parts:
+        return parts[0]
     if len(parts) >= 2 and parts[0] != parts[1]:
         return "MIXED"
     return parts[0]
@@ -341,6 +372,27 @@ def output_dtype_from_row(row: dict[str, str]) -> str:
 
 def dtype_size(dtype: str) -> int:
     return DTYPE_BYTES.get(dtype, DTYPE_BYTES.get(dtype.replace("DT_", ""), 4))
+
+
+def dtype_bitwidth(dtype: str) -> int:
+    normalized = dtype.upper().replace("DT_", "")
+    if dtype.upper() in DTYPE_BITS:
+        return DTYPE_BITS[dtype.upper()]
+    return DTYPE_BITS.get(normalized, dtype_size(dtype) * 8)
+
+
+def is_quantized_data_dtype(dtype: str) -> bool:
+    normalized = dtype.upper().replace("DT_", "")
+    return normalized in {"INT4", "UINT4", "INT8", "UINT8", "FLOAT8", "FP8", "MXFP8"}
+
+
+def is_scale_dtype(dtype: str) -> bool:
+    normalized = dtype.upper().replace("DT_", "")
+    return normalized in {"FLOAT", "FLOAT32", "FLOAT16", "BFLOAT16", "BF16"}
+
+
+def is_quant_kernel_type(kernel_type: str) -> bool:
+    return "quant" in kernel_type.lower()
 
 
 def peak_for_dtype(config: dict[str, Any], dtype: str) -> float | None:
@@ -570,8 +622,168 @@ def infer_nd2nz_operands(spec: MatmulSpec, dtype: str) -> tuple[bool, bool]:
     return nd2nz_a, nd2nz_b
 
 
+def split_semicolon_values(value: str | None) -> list[str]:
+    if not value or value == "N/A":
+        return []
+    return [part.strip() for part in value.strip().replace('"', "").split(";") if part.strip()]
+
+
+def quant_storage_bytes(elements: int, dtype: str) -> int:
+    bitwidth = dtype_bitwidth(dtype)
+    if bitwidth < 8:
+        return ceil_div(elements * bitwidth, 8)
+    return elements * dtype_size(dtype)
+
+
+def infer_quant_spec(
+    row: dict[str, str],
+    spec: MatmulSpec,
+    input_shapes: list[list[int]],
+) -> QuantSpec:
+    kernel_type = row.get("Type", "")
+    input_dtypes = split_semicolon_values(row.get("Input Data Types"))
+    output_dtype = output_dtype_from_row(row)
+    if not is_quant_kernel_type(kernel_type) and not any(is_quantized_data_dtype(dtype) for dtype in input_dtypes[:2]):
+        return QuantSpec(is_quant=False)
+
+    a_dtype = input_dtypes[0] if input_dtypes else "UNKNOWN"
+    b_dtype = input_dtypes[1] if len(input_dtypes) > 1 else "UNKNOWN"
+    aux_shapes = input_shapes[2:] if len(input_shapes) > 2 else []
+    aux_dtypes = input_dtypes[2:] if len(input_dtypes) > 2 else []
+    aux_elements = sum(num_elements(shape) for shape in aux_shapes)
+    aux_bytes = 0
+    for shape, dtype in zip(aux_shapes, aux_dtypes):
+        aux_bytes += num_elements(shape) * dtype_size(dtype)
+
+    quant_data_inputs = sum(1 for dtype in (a_dtype, b_dtype) if is_quantized_data_dtype(dtype))
+    has_scale = any(is_scale_dtype(dtype) for dtype in aux_dtypes)
+    has_fp8 = any(dtype.upper().replace("DT_", "") in {"FLOAT8", "FP8", "MXFP8"} for dtype in input_dtypes)
+    mode = "mxfp8" if has_fp8 else "int"
+    mode += f"{min(dtype_bitwidth(a_dtype), dtype_bitwidth(b_dtype))}"
+
+    if quant_data_inputs == 2 and has_scale and output_dtype in {"FLOAT16", "DT_FLOAT16", "DT_BF16", "BFLOAT16", "FLOAT", "DT_FLOAT"}:
+        compute_path = "full_quant_with_dequant"
+    elif quant_data_inputs == 2:
+        compute_path = "full_quant"
+    else:
+        compute_path = "fake_quant_or_mixed"
+
+    granularity = "unknown"
+    notes: list[str] = []
+    for shape in aux_shapes:
+        if len(shape) == 1:
+            dim = shape[0]
+            if dim == spec.n and dim != spec.m:
+                granularity = "per_channel_n"
+            elif dim == spec.m and dim != spec.n:
+                granularity = "per_token_m"
+            elif dim == spec.n and dim == spec.m:
+                granularity = "per_channel_n_or_per_token_m"
+                notes.append("scale_shape_equals_m_and_n")
+            elif dim == 1:
+                granularity = "per_tensor"
+            elif spec.n % dim == 0 or spec.m % dim == 0:
+                granularity = "per_group_or_block"
+            else:
+                granularity = "vector_scale_unknown_axis"
+        elif len(shape) >= 2:
+            if shape[-1] == spec.n and shape[-2] in {1, spec.m}:
+                granularity = "per_token_per_channel"
+            elif shape[-1] != spec.n and spec.n % shape[-1] == 0:
+                granularity = "per_group"
+            else:
+                granularity = "tensor_scale"
+
+    if not aux_shapes:
+        granularity = "none"
+    if has_scale and granularity == "unknown":
+        notes.append("scale_dtype_present_but_granularity_unknown")
+    if compute_path.startswith("full_quant") and has_scale:
+        notes.append("int_accumulate_then_dequant")
+
+    deduped_notes = list(dict.fromkeys(notes))
+    return QuantSpec(
+        is_quant=True,
+        mode=mode,
+        granularity=granularity,
+        compute_path=compute_path,
+        aux_elements=aux_elements,
+        aux_bytes=aux_bytes,
+        notes="|".join(deduped_notes),
+    )
+
+
+def estimate_quant_cost(
+    spec: MatmulSpec,
+    tile: TileEstimate,
+    quant_spec: QuantSpec,
+    input_shapes: list[list[int]],
+    input_dtypes: list[str],
+    output_dtype: str,
+    config: dict[str, Any],
+) -> tuple[float | None, float, float, int, int]:
+    quant_cfg = config.get("quant_matmul", {})
+    output_elements = spec.output_storage_elements or spec.batch * spec.m * spec.n
+    a_elements = spec.a_storage_elements or spec.batch * spec.m * spec.k
+    b_elements = spec.b_storage_elements or spec.batch * spec.k * spec.n
+    a_dtype = input_dtypes[0] if input_dtypes else "UNKNOWN"
+    b_dtype = input_dtypes[1] if len(input_dtypes) > 1 else "UNKNOWN"
+    out_size = dtype_size(output_dtype)
+
+    aux_bytes = quant_spec.aux_bytes
+    quant_gm_bytes_min = (
+        quant_storage_bytes(a_elements, a_dtype)
+        + quant_storage_bytes(b_elements, b_dtype)
+        + aux_bytes
+        + output_elements * out_size
+    )
+
+    scale_replay = float(quant_cfg.get("scale_replay_factor", 1.0))
+    quant_gm_bytes_tiled = int(
+        quant_storage_bytes(a_elements, a_dtype) * tile.tile_n
+        + quant_storage_bytes(b_elements, b_dtype) * tile.tile_m
+        + aux_bytes * scale_replay
+        + output_elements * out_size
+    )
+    l2_bytes = int(config.get("l2_bytes", 0))
+    if l2_bytes > 0 and quant_gm_bytes_min <= l2_bytes:
+        quant_gm_bytes_tiled = quant_gm_bytes_min
+    elif l2_bytes > 0:
+        redundant = max(0, quant_gm_bytes_tiled - quant_gm_bytes_min)
+        l2_pressure = max(0.0, 1.0 - l2_bytes / max(quant_gm_bytes_min, 1))
+        quant_gm_bytes_tiled = int(quant_gm_bytes_min + redundant * l2_pressure)
+
+    hbm_us = quant_gm_bytes_tiled / (float(config["hbm_bandwidth_tbps"]) * 1_000_000.0)
+
+    peak_tops = peak_for_dtype(config, a_dtype)
+    if peak_tops is None:
+        peak_tops = quant_cfg.get("peak_tops", {}).get(a_dtype)
+    if peak_tops is None:
+        peak_tops = quant_cfg.get("peak_tops", {}).get(a_dtype.replace("DT_", ""))
+
+    compute_us: float | None = None
+    if peak_tops is not None:
+        efficiency = float(quant_cfg.get("pipeline_efficiency", {}).get(a_dtype, quant_cfg.get("pipeline_efficiency", {}).get("default", 1.0)))
+        efficiency = max(efficiency, 1e-9)
+        op_factor = float(quant_cfg.get("operation_factor", {}).get(quant_spec.compute_path, 1.0))
+        compute_us = tile.aligned_flops * op_factor / (float(peak_tops) * 1_000_000.0 * tile.core_efficiency * efficiency)
+
+    dequant_per_elem_us = float(quant_cfg.get("dequant_us_per_output_element", 0.0))
+    dequant_us = output_elements * dequant_per_elem_us if quant_spec.compute_path == "full_quant_with_dequant" else 0.0
+    if compute_us is not None:
+        compute_us += dequant_us
+
+    return compute_us, hbm_us, dequant_us, quant_gm_bytes_min, quant_gm_bytes_tiled
+
+
 def classify(row: dict[str, Any]) -> tuple[str, str]:
     tags: list[str] = []
+    if row.get("quant_mode", "none") != "none":
+        tags.append("quant_matmul")
+    if row.get("quant_compute_path") == "full_quant_with_dequant":
+        tags.append("full_quant_dequant")
+    elif row.get("quant_compute_path") == "fake_quant_or_mixed":
+        tags.append("fake_or_mixed_quant")
     if row["b_format"] == "FRACTAL_NZ":
         tags.append("weight_nz")
     elif row["a_format"] == "FRACTAL_NZ" or row["output_format"] == "FRACTAL_NZ":
@@ -672,8 +884,31 @@ def evaluate_file(
                     int(nd2nz_a) + int(nd2nz_b)
                 ) * calibration_value(config, "format_overhead_us", "ND2NZ", 0.0)
 
+            input_dtypes = split_semicolon_values(row.get("Input Data Types"))
+            quant_spec = infer_quant_spec(row, spec, input_shapes)
+            quant_compute_us: float | None = None
+            quant_hbm_us: float | None = None
+            quant_dequant_us = 0.0
+            quant_gm_bytes_min: int | None = None
+            quant_gm_bytes_tiled: int | None = None
+            if quant_spec.is_quant:
+                (
+                    quant_compute_us,
+                    quant_hbm_us,
+                    quant_dequant_us,
+                    quant_gm_bytes_min,
+                    quant_gm_bytes_tiled,
+                ) = estimate_quant_cost(spec, tile, quant_spec, input_shapes, input_dtypes, output_dtype, config)
+
             compute_for_est = None if tile.compute_us is None else tile.compute_us / pipeline_eff
-            if compute_for_est is None:
+            if quant_spec.is_quant:
+                launch_us = calibration_value(config, "launch_overhead_us_by_type", kernel_type, launch_us)
+                compute_for_est = quant_compute_us
+                if compute_for_est is None:
+                    estimated_us = launch_us + (quant_hbm_us or tile.hbm_us) + format_overhead
+                else:
+                    estimated_us = launch_us + max(compute_for_est, quant_hbm_us or tile.hbm_us) + format_overhead
+            elif compute_for_est is None:
                 estimated_us = launch_us + tile.hbm_us + format_overhead
             else:
                 estimated_us = launch_us + max(compute_for_est, tile.hbm_us) + format_overhead
@@ -716,6 +951,12 @@ def evaluate_file(
                 "storage_padding_ratio": storage_padding_ratio,
                 "nd2nz_a": int(nd2nz_a),
                 "nd2nz_b": int(nd2nz_b),
+                "quant_mode": quant_spec.mode,
+                "quant_granularity": quant_spec.granularity,
+                "quant_compute_path": quant_spec.compute_path,
+                "quant_aux_elements": quant_spec.aux_elements,
+                "quant_aux_bytes": quant_spec.aux_bytes,
+                "quant_notes": quant_spec.notes,
                 "block_dim": parse_int(row.get("Block Dim")),
                 "mix_block_dim": parse_int(row.get("Mix Block Dim")),
                 "aic_num": int(config["aic_num"]),
@@ -746,9 +987,16 @@ def evaluate_file(
                 "gm_bytes_min": tile.gm_bytes_min,
                 "gm_bytes_tiled_raw": tile.gm_bytes_tiled_raw,
                 "gm_bytes_tiled": tile.gm_bytes_tiled,
-                "compute_us": tile.compute_us,
-                "hbm_us": tile.hbm_us,
-                "lower_bound_us": tile.lower_bound_us,
+                "compute_us": quant_compute_us if quant_spec.is_quant else tile.compute_us,
+                "hbm_us": quant_hbm_us if quant_spec.is_quant and quant_hbm_us is not None else tile.hbm_us,
+                "lower_bound_us": (
+                    max(value for value in (quant_compute_us, quant_hbm_us) if value is not None)
+                    if quant_spec.is_quant and (quant_compute_us is not None or quant_hbm_us is not None)
+                    else tile.lower_bound_us
+                ),
+                "quant_dequant_us": quant_dequant_us,
+                "quant_gm_bytes_min": quant_gm_bytes_min,
+                "quant_gm_bytes_tiled": quant_gm_bytes_tiled,
                 "launch_overhead_us": launch_us,
                 "pipeline_efficiency": pipeline_eff,
                 "format_overhead_us": format_overhead,
@@ -836,6 +1084,7 @@ def calibration_suggestions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Suggest global calibration constants without fitting per-shape curves."""
     launch_by_type: dict[str, float] = {}
     pipeline_by_dtype: dict[str, float] = {}
+    quant_pipeline: dict[str, float] = {}
 
     kernel_types = sorted({row["type"] for row in rows})
     for kernel_type in kernel_types:
@@ -857,6 +1106,7 @@ def calibration_suggestions(rows: list[dict[str, Any]]) -> dict[str, Any]:
             for row in rows
             if row["dtype"] == dtype
             and row["peak_tflops"]
+            and row.get("quant_mode", "none") == "none"
             and row["m"] >= 128
             and row["n"] >= 128
             and row["k"] >= 128
@@ -868,12 +1118,32 @@ def calibration_suggestions(rows: list[dict[str, Any]]) -> dict[str, Any]:
             # the best compute-dominant examples, not an interpolation curve.
             pipeline_by_dtype[dtype] = round(max(0.1, percentile(efficiencies, 0.9)), 6)
 
-    return {
+    quant_modes = sorted({row.get("quant_mode", "none") for row in rows if row.get("quant_mode", "none") != "none"})
+    for mode in quant_modes:
+        efficiencies = [
+            min(
+                1.0,
+                row["aligned_flops"] / (row["duration_us"] * row["peak_tflops"] * 1_000_000.0 * max(row["core_efficiency"], 1e-9)),
+            )
+            for row in rows
+            if row.get("quant_mode") == mode
+            and row["duration_us"] > 0
+            and row["peak_tflops"]
+            and row.get("quant_compute_path") in {"full_quant", "full_quant_with_dequant"}
+            and row["cube_utilization_pct"] >= 90
+        ]
+        if efficiencies:
+            quant_pipeline[mode.upper()] = round(max(0.1, percentile(efficiencies, 0.5)), 6)
+
+    suggestions: dict[str, Any] = {
         "calibration": {
             "launch_overhead_us_by_type": launch_by_type,
             "pipeline_efficiency_by_dtype": pipeline_by_dtype,
         }
     }
+    if quant_pipeline:
+        suggestions["quant_matmul"] = {"pipeline_efficiency": quant_pipeline}
+    return suggestions
 
 
 def print_calibration_suggestions(rows: list[dict[str, Any]]) -> dict[str, Any]:

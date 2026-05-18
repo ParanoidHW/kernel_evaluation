@@ -194,10 +194,54 @@ HBM 估算考虑 L2：
 - 如果 `gm_bytes_min <= l2_bytes`，重复 tile 读取视为 L2 命中，HBM 使用 `gm_bytes_min`。
 - 如果超过 L2，则对 `gm_bytes_tiled_raw - gm_bytes_min` 的冗余流量施加一个确定性的 L2 pressure 项。
 
+## Quant Matmul 处理
+
+量化 matmul 使用独立路径，不再沿用普通浮点 matmul 模型。满足以下任一条件就会进入量化路径：kernel type 中包含 `Quant`，或者 A/B 输入 dtype 是 `INT8`、`INT4`、`MXFP8` 等低 bit 数据类型。
+
+评估器会推断：
+
+- `quant_mode`：根据 A/B dtype 判断 `int8`、`int4`、`mxfp8` 等模式。
+- `quant_compute_path`：`full_quant`、`full_quant_with_dequant` 或 `fake_quant_or_mixed`。
+- `quant_granularity`：根据 scale 等辅助输入 shape 推断量化粒度。
+- `quant_aux_bytes`：scale/offset 等辅助输入流量。
+
+全量化指 A 和 B 都是低 bit tensor，并且主 matmul 路径按低 bit cube 吞吐建模。如果 A/B 是低 bit，额外带 FLOAT scale，输出是 FP16/BF16/FP32，则标记为 `full_quant_with_dequant`：主路径按 integer accumulate 估算，同时认为存在 scale/dequant/output conversion。若只有部分输入是低 bit 或规格不够明确，则标记为 `fake_quant_or_mixed`。
+
+量化粒度根据 scale shape 推断：
+
+- 标量或 `[1]`：`per_tensor`。
+- 一维 scale 等于 `N`：`per_channel_n`。
+- 一维 scale 等于 `M`：`per_token_m`。
+- 如果 `M == N` 且 scale 为 `[M] == [N]`，则只能标记为 `per_channel_n_or_per_token_m`，因为仅凭 shape 无法判断轴。
+- 如果 scale shape 能整除 `M` 或 `N`，标记为 `per_group_or_block`。
+- FP8/MXFP8 会体现在 `quant_mode` 中，但具体 block size 需要 profiling CSV 之外的元数据。
+
+量化 HBM 字节按低 bit 存储重新计算：
+
+```text
+quant_A_bytes = A_elements * bitwidth(A) / 8
+quant_B_bytes = B_elements * bitwidth(B) / 8
+quant_aux_bytes = sum(product(aux_shape) * aux_dtype_size)
+quant_output_bytes = C_elements * output_dtype_size
+```
+
+量化 compute 时间使用 `configs/ascend_910b4.json::quant_matmul` 中的显式参数：
+
+```text
+quant_compute_us =
+  aligned_flops * operation_factor /
+  (peak_tops * 1e6 * core_eff * quant_pipeline_efficiency)
+```
+
+当前 `QuantBatchMatmulV3` 样例的输入是 `INT8;INT8;FLOAT;FLOAT`，输出是 `FLOAT16`，两个辅助输入 shape 都是 `[4096]`。由于该规格中 `M == N == 4096`，工具会推断为 `int8`、`full_quant_with_dequant`、`per_channel_n_or_per_token_m`。
+
 ## 诊断标签
 
 输出中的 `diagnosis` 会包含以下标签：
 
+- `quant_matmul`：使用了量化 matmul 路径。
+- `full_quant_dequant`：低 bit matmul 后接浮点输出转换。
+- `fake_or_mixed_quant`：伪量化或混合量化路径。
 - `weight_nz`：B 为 `FRACTAL_NZ`。
 - `fractal_nz`：A 或 output 为 `FRACTAL_NZ`。
 - `runtime_nd2nz`：检测到运行时 ND2NZ。
@@ -217,6 +261,10 @@ HBM 估算考虑 L2：
 - `launch_overhead_us_by_type`：按 kernel type 的全局启动/调度开销。
 - `pipeline_efficiency_by_dtype`：大 shape、compute-heavy 场景下的持续峰值比例。
 - `format_overhead_us.ND2NZ`：检测到运行时 ND2NZ 时的可选全局转换开销。
+- `quant_matmul.peak_tops`：低 bit 有效计算吞吐。
+- `quant_matmul.pipeline_efficiency`：低 bit 全局流水效率。
+- `quant_matmul.operation_factor`：full/fake quant 路径的成本倍率。
+- `quant_matmul.dequant_us_per_output_element`：可选 dequant/output conversion 项。
 
 当前自动建议逻辑很简单：
 
@@ -230,7 +278,7 @@ HBM 估算考虑 L2：
 当前 profiling 样例验证结果：
 
 ```text
-resolved_matmul_rows = 993
+resolved_matmul_rows = 1256
 unresolved_rows = 0
 ```
 
@@ -245,6 +293,19 @@ diagnosis = weight_nz|small_m_overhead|memory_bound
 ```
 
 回归检查：旧版已经解析的 990 条，在加入 format-aware 解析后，`M/N/K/batch/transA/transB` 没有变化。
+
+当前低 bit profiling 文件包含 11 条 `QuantBatchMatmulV3`：
+
+```text
+Input dtypes = INT8;INT8;FLOAT;FLOAT
+Output dtype = FLOAT16
+M=4096, N=4096, K=12800
+quant_mode = int8
+quant_compute_path = full_quant_with_dequant
+quant_granularity = per_channel_n_or_per_token_m
+median actual / estimate ~= 1.15
+median absolute percentage error ~= 12.9%
+```
 
 ## CLI
 
@@ -280,4 +341,5 @@ python3 tools/eval_matmul.py \
 - AllGatherMatmul 默认排除，当前不建模通信。
 - cache 大小和峰值 TFLOPS 当前是配置假设，拿到官方 910B4 数据后应更新配置。
 - 运行时 ND2NZ 检测目前使用 MatMulV3 风格条件，对 BatchMatMulV3 的 multi-batch 特殊路径还可以进一步细化。
+- Quant matmul 支持会区分模式和粒度，但仍依赖有效 `peak_tops` 和 pipeline 参数。MXFP8、per-group 等更多量化模式需要更多 profiling 样例验证。
 - 如果 profiling 导出的 `FRACTAL_NZ` shape 不是 storage shape，而是 origin shape，则当前 NZ 还原规则需要额外元数据辅助。

@@ -194,10 +194,54 @@ HBM bytes are L2-aware:
 - If `gm_bytes_min <= l2_bytes`, repeated tile reads are treated as L2 hits and `gm_bytes_min` is used.
 - Otherwise, deterministic L2 pressure is applied to a portion of `gm_bytes_tiled_raw - gm_bytes_min`.
 
+## Quant Matmul Handling
+
+Quantized matmul rows use a dedicated path instead of the normal floating-point model. A row is considered quantized if the kernel type contains `Quant` or if A/B input dtypes are low-bit data types such as `INT8`, `INT4`, or `MXFP8`.
+
+The evaluator infers:
+
+- `quant_mode`: `int8`, `int4`, `mxfp8`, etc., from A/B dtypes.
+- `quant_compute_path`: `full_quant`, `full_quant_with_dequant`, or `fake_quant_or_mixed`.
+- `quant_granularity`: inferred from auxiliary scale tensor shapes.
+- `quant_aux_bytes`: scale/offset auxiliary traffic.
+
+Full quantization means A and B are low-bit tensors and the cube path is modeled with low-bit effective TOPS. If low-bit A/B are accompanied by floating scale tensors and the output is FP16/BF16/FP32, the path is marked as `full_quant_with_dequant`: integer accumulation is assumed on the main matmul path, followed by scale/dequant/output conversion. If only part of the inputs are low-bit or the spec is ambiguous, the path is marked as `fake_quant_or_mixed`.
+
+Granularity is inferred from scale shapes:
+
+- Scalar or `[1]`: `per_tensor`.
+- One-dimensional scale equal to `N`: `per_channel_n`.
+- One-dimensional scale equal to `M`: `per_token_m`.
+- If `M == N` and scale is `[M] == [N]`, the result is `per_channel_n_or_per_token_m` because shape alone cannot disambiguate the axis.
+- Shapes that divide `M` or `N` are marked as `per_group_or_block`.
+- FP8/MXFP8 dtypes are marked through `quant_mode`; block-size details still require more metadata than the profiling CSV currently exposes.
+
+Quant HBM bytes are recomputed with low-bit storage:
+
+```text
+quant_A_bytes = A_elements * bitwidth(A) / 8
+quant_B_bytes = B_elements * bitwidth(B) / 8
+quant_aux_bytes = sum(product(aux_shape) * aux_dtype_size)
+quant_output_bytes = C_elements * output_dtype_size
+```
+
+Quant compute time uses `configs/ascend_910b4.json::quant_matmul`:
+
+```text
+quant_compute_us =
+  aligned_flops * operation_factor /
+  (peak_tops * 1e6 * core_eff * quant_pipeline_efficiency)
+```
+
+For the current `QuantBatchMatmulV3` samples, the inputs are `INT8;INT8;FLOAT;FLOAT`, output is `FLOAT16`, and auxiliary shapes are `[4096]` and `[4096]`. The model infers `int8`, `full_quant_with_dequant`, and `per_channel_n_or_per_token_m` because this shape has `M == N == 4096`.
+
 ## Diagnostics
 
 The output includes diagnosis tags:
 
+- `quant_matmul`: quantized matmul path is used.
+- `full_quant_dequant`: low-bit matmul with floating output conversion.
+- `fake_or_mixed_quant`: ambiguous or mixed quantization path.
 - `weight_nz`: B is `FRACTAL_NZ`.
 - `fractal_nz`: A or output is `FRACTAL_NZ`.
 - `runtime_nd2nz`: runtime ND2NZ path is detected.
@@ -217,6 +261,10 @@ Only global terms should be calibrated:
 - `launch_overhead_us_by_type`: global launch/scheduling overhead per kernel type.
 - `pipeline_efficiency_by_dtype`: sustained fraction of dtype peak for large compute-heavy cases.
 - `format_overhead_us.ND2NZ`: optional global cost for detected runtime ND2NZ conversion.
+- `quant_matmul.peak_tops`: effective low-bit compute throughput.
+- `quant_matmul.pipeline_efficiency`: global low-bit pipeline efficiency.
+- `quant_matmul.operation_factor`: cost multiplier for full/fake quant paths.
+- `quant_matmul.dequant_us_per_output_element`: optional dequant/output conversion term.
 
 The helper suggestion logic is deliberately simple:
 
@@ -230,7 +278,7 @@ Do not fit per-shape coefficients. If residuals are large, add an explainable te
 With the current example profiling set:
 
 ```text
-resolved_matmul_rows = 993
+resolved_matmul_rows = 1256
 unresolved_rows = 0
 ```
 
@@ -245,6 +293,19 @@ diagnosis = weight_nz|small_m_overhead|memory_bound
 ```
 
 Regression check: the previously resolved 990 rows keep the same `M/N/K/batch/transA/transB` after format-aware parsing.
+
+The current low-bit profiling file contains 11 `QuantBatchMatmulV3` rows:
+
+```text
+Input dtypes = INT8;INT8;FLOAT;FLOAT
+Output dtype = FLOAT16
+M=4096, N=4096, K=12800
+quant_mode = int8
+quant_compute_path = full_quant_with_dequant
+quant_granularity = per_channel_n_or_per_token_m
+median actual / estimate ~= 1.15
+median absolute percentage error ~= 12.9%
+```
 
 ## CLI
 
@@ -280,4 +341,5 @@ Optional flags:
 - AllGatherMatmul communication is excluded by default.
 - Cache sizes and peak TFLOPS are configurable assumptions unless official 910B4 values are supplied.
 - Runtime ND2NZ detection currently uses MatMulV3-style conditions for all included rows; BatchMatMulV3-specific multi-batch paths may need refinement if those rows become important.
+- Quant matmul support is mode-aware but still relies on effective `peak_tops` and pipeline parameters. More quantization modes, especially MXFP8 and per-group variants, need additional profiling examples to validate.
 - If profiling exports origin shapes instead of storage shapes for `FRACTAL_NZ`, the current NZ inference would need additional metadata.
