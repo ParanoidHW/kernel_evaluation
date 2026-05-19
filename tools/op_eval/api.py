@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from .common import load_config
+from .profiling import iter_input_files
+from .types import ProfilingEvaluation
 
 
 def estimate_op(op_type: str, *args: Any, **kwargs: Any) -> Any:
@@ -18,4 +20,55 @@ def estimate_op(op_type: str, *args: Any, **kwargs: Any) -> Any:
     raise NotImplementedError(f"unsupported operator type: {op_type}")
 
 
-__all__ = ["estimate_op", "load_config"]
+def evaluate_profiling(
+    profiling: str | Path | list[str | Path],
+    *,
+    op_kind: str = "matmul",
+    config: dict[str, Any] | str | Path | None = None,
+    config_path: str | Path | None = None,
+    include_gmm: bool = False,
+    include_allgather: bool = False,
+) -> ProfilingEvaluation:
+    """Evaluate profiling CSV files and return library-friendly result rows.
+
+    This is the API counterpart of the CLI. It keeps file discovery, hardware
+    config loading, and operator-family dispatch out of callers such as a
+    whole-network evaluator.
+    """
+
+    if isinstance(profiling, (str, Path)):
+        profiling_items = [profiling]
+    else:
+        profiling_items = profiling
+    profiling_inputs = [str(item) for item in profiling_items]
+
+    if isinstance(config, dict):
+        resolved_config = config
+    else:
+        path = config_path or config
+        if path is None:
+            raise ValueError("evaluate_profiling requires either config or config_path")
+        resolved_config = load_config(path)
+    normalized_kind = op_kind.lower()
+    if normalized_kind != "matmul":
+        raise NotImplementedError(f"unsupported op_kind: {op_kind}")
+
+    from matmul_eval.evaluator import evaluate_file
+    from matmul_eval.runtime_kb import load_runtime_kb
+
+    runtime_kb = load_runtime_kb(resolved_config)
+    report = ProfilingEvaluation(op_kind="matmul")
+    for profiling_file in iter_input_files(profiling_inputs):
+        rows, unresolved = evaluate_file(
+            profiling_file,
+            config=resolved_config,
+            runtime_kb=runtime_kb,
+            include_gmm=include_gmm,
+            include_allgather=include_allgather,
+        )
+        report.rows.extend(rows)
+        report.unresolved.extend(unresolved)
+    return report
+
+
+__all__ = ["ProfilingEvaluation", "estimate_op", "evaluate_profiling", "load_config"]

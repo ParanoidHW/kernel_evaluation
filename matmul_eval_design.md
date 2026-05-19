@@ -389,7 +389,7 @@ Run one SoC directory with the matching config. Directory inputs are scanned rec
 910B4 report:
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --output matmul_eval_report_910b4.csv \
@@ -399,7 +399,7 @@ python3 tools/eval_matmul.py \
 910C report:
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910C \
   --config configs/ascend_910c.json \
   --output matmul_eval_report_910c.csv \
@@ -409,7 +409,7 @@ python3 tools/eval_matmul.py \
 Calibration suggestions should be generated against the matching SoC directory and config:
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --suggest-calibration \

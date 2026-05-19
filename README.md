@@ -7,7 +7,6 @@ This repository contains a small evaluator for estimating Ascend operator kernel
 - Hardware targets: Ascend 910B4 and Ascend 910C.
 - Profiling inputs: `example_profilings/910B4` and `example_profilings/910C`.
 - Main tool: `tools/eval_ops.py`.
-- Compatibility MatMul CLI: `tools/eval_matmul.py`.
 - Design notes: `matmul_eval_design.md` and `matmul_eval_design_zh.md`.
 
 ## Information Sources
@@ -26,7 +25,6 @@ The local ops-nn kernel code was taken from the upstream GitCode `cann/ops-nn` m
 ## Tool Layout
 
 - `tools/eval_ops.py`: generic operator profiling CLI entry point.
-- `tools/eval_matmul.py`: backward-compatible wrapper using the same generic CLI.
 - `tools/op_eval/common.py`: shared config, dtype, format, shape, and numeric helpers.
 - `tools/op_eval/profiling.py`: profiling CSV file discovery, default row filtering, and CSV report writing.
 - `tools/op_eval/api.py`: generic `estimate_op(...)` dispatcher for future operator families.
@@ -63,6 +61,14 @@ PYTHONPATH=tools python3 -c 'from op_eval import estimate_op; r = estimate_op("M
 ```
 
 The stable public cost fields are `flops_cost_us`, `memory_access_us`, `total_us`, and `bound_type`. `bound_type` is the end-to-end dominant bound (`compute_bound`, `memory_access_bound`, `launch_bound`, `format_bound`, or `balanced_bound`); `kernel_bound_type` keeps the compute-vs-memory kernel-only classification.
+
+Batch profiling API:
+
+```bash
+PYTHONPATH=tools python3 -c 'from op_eval import evaluate_profiling; r = evaluate_profiling("example_profilings/910B4", config_path="configs/ascend_910b4.json"); print(r.resolved_count, r.unresolved_count)'
+```
+
+`evaluate_profiling(...)` is the library entry point used by the CLI and intended for upper-layer whole-network evaluators. It returns a `ProfilingEvaluation` object with `rows`, `unresolved`, `resolved_count`, `unresolved_count`, and `to_dict()`.
 
 910B4:
 

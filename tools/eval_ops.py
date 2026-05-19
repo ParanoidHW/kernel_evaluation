@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import sys
-
-from op_eval.cli import main
+from op_eval.cli import run_cli
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(run_cli())

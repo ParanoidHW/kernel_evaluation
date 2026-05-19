@@ -4,13 +4,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
-from matmul_eval.evaluator import evaluate_file, print_calibration_suggestions, print_summary
-from matmul_eval.runtime_kb import load_runtime_kb
+from matmul_eval.evaluator import print_calibration_suggestions, print_summary
 
-from .common import load_config
-from .profiling import iter_input_files, write_csv
+from .api import evaluate_profiling
+from .profiling import write_csv
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -47,21 +45,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    config = load_config(args.config)
-    runtime_kb = load_runtime_kb(config)
-
-    rows: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
-    for profiling_file in iter_input_files(args.profiling):
-        file_rows, file_unresolved = evaluate_file(
-            profiling_file,
-            config=config,
-            runtime_kb=runtime_kb,
-            include_gmm=args.include_gmm,
-            include_allgather=args.include_allgather,
-        )
-        rows.extend(file_rows)
-        unresolved.extend(file_unresolved)
+    report = evaluate_profiling(
+        args.profiling,
+        op_kind=args.op_kind,
+        config_path=args.config,
+        include_gmm=args.include_gmm,
+        include_allgather=args.include_allgather,
+    )
+    rows = report.rows
+    unresolved = report.unresolved
 
     print_summary(rows, unresolved)
 
@@ -82,5 +74,11 @@ def main(argv: list[str]) -> int:
     return 0
 
 
+def run_cli() -> int:
+    """Console-script compatible entry point."""
+
+    return main(sys.argv[1:])
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(run_cli())

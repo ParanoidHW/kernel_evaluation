@@ -385,7 +385,7 @@ median absolute percentage error ~= 1.0%
 910B4 报告：
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --output matmul_eval_report_910b4.csv \
@@ -395,7 +395,7 @@ python3 tools/eval_matmul.py \
 910C 报告：
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910C \
   --config configs/ascend_910c.json \
   --output matmul_eval_report_910c.csv \
@@ -405,7 +405,7 @@ python3 tools/eval_matmul.py \
 校准建议需要使用匹配的 SoC 目录和配置：
 
 ```bash
-python3 tools/eval_matmul.py \
+python3 tools/eval_ops.py \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --suggest-calibration \
