@@ -17,6 +17,11 @@ def estimate_op(op_type: str, *args: Any, **kwargs: Any) -> Any:
 
         kwargs.setdefault("kernel_type", op_type)
         return estimate_matmul(*args, **kwargs)
+    if "attention" in text or "attentionscore" in text:
+        from attention_eval import estimate_attention
+
+        kwargs.setdefault("kernel_type", op_type)
+        return estimate_attention(*args, **kwargs)
     raise NotImplementedError(f"unsupported operator type: {op_type}")
 
 
@@ -50,22 +55,32 @@ def evaluate_profiling(
             raise ValueError("evaluate_profiling requires either config or config_path")
         resolved_config = load_config(path)
     normalized_kind = op_kind.lower()
-    if normalized_kind != "matmul":
+    if normalized_kind not in {"matmul", "attention"}:
         raise NotImplementedError(f"unsupported op_kind: {op_kind}")
 
-    from matmul_eval.evaluator import evaluate_file
-    from matmul_eval.runtime_kb import load_runtime_kb
+    if normalized_kind == "matmul":
+        from matmul_eval.evaluator import evaluate_file
+        from matmul_eval.runtime_kb import load_runtime_kb
 
-    runtime_kb = load_runtime_kb(resolved_config)
-    report = ProfilingEvaluation(op_kind="matmul")
+        runtime_kb = load_runtime_kb(resolved_config)
+        report = ProfilingEvaluation(op_kind="matmul")
+        for profiling_file in iter_input_files(profiling_inputs):
+            rows, unresolved = evaluate_file(
+                profiling_file,
+                config=resolved_config,
+                runtime_kb=runtime_kb,
+                include_gmm=include_gmm,
+                include_allgather=include_allgather,
+            )
+            report.rows.extend(rows)
+            report.unresolved.extend(unresolved)
+        return report
+
+    from attention_eval.evaluator import evaluate_file
+
+    report = ProfilingEvaluation(op_kind="attention")
     for profiling_file in iter_input_files(profiling_inputs):
-        rows, unresolved = evaluate_file(
-            profiling_file,
-            config=resolved_config,
-            runtime_kb=runtime_kb,
-            include_gmm=include_gmm,
-            include_allgather=include_allgather,
-        )
+        rows, unresolved = evaluate_file(profiling_file, config=resolved_config)
         report.rows.extend(rows)
         report.unresolved.extend(unresolved)
     return report

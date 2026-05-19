@@ -1,6 +1,9 @@
 # Large local inputs and extracted operator sources.
 /example_profilings/
 /ops-nn-master-matmul-*/
+/ops-transformer-master/
+/ops-math-master/
+/ops-cv-master/
 /*.zip
 
 # Generated evaluator outputs.
@@ -10,6 +13,10 @@
 /matmul_eval_unresolved_*.csv
 /matmul_eval_calibration_suggested.json
 /matmul_eval_calibration_suggested_*.json
+/attention_eval_report.csv
+/attention_eval_report_*.csv
+/attention_eval_unresolved.csv
+/attention_eval_unresolved_*.csv
 
 # Python caches.
 __pycache__/

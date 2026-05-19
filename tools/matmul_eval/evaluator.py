@@ -14,12 +14,25 @@ from .common import *
 from .kernel_model import advanced_tiling_notes, ideal_kernel_bounds
 from .quant_model import infer_quant_spec
 
+
+def tiling_source_split(source: str) -> tuple[str, str, str, str]:
+    """Classify current tiling source into actual/fallback/optimal semantics."""
+
+    if source in {"runtime_kb_exact", "advanced_tiling_heuristic"}:
+        return source, "", "physical_lower_bound", "actual_tiling"
+    if source == "analytic_search":
+        return "", source, "physical_lower_bound", "fallback_tiling"
+    return "", source or "unknown", "physical_lower_bound", "fallback_tiling"
+
+
 def classify(row: dict[str, Any]) -> tuple[str, str]:
     tags: list[str] = []
     if row.get("kernel_tiling_source") == "runtime_kb_exact":
         tags.append("runtime_kb_exact")
     elif row.get("kernel_tiling_source") == "advanced_tiling_heuristic":
         tags.append("advanced_tiling_heuristic")
+    if row.get("current_tiling_kind") == "fallback_tiling":
+        tags.append("fallback_tiling")
     if "stream_k" in str(row.get("tiling_strategy", "")):
         tags.append("stream_k")
     if row.get("full_load") == "A_FULL_LOAD":
@@ -67,6 +80,8 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         if ratio > 5:
             tags.append("large_residual")
     confidence = "high"
+    if row.get("current_tiling_kind") == "fallback_tiling":
+        confidence = "medium"
     if row["m"] <= 4 or row["mn_tile_count"] < row["aic_num"]:
         confidence = "low"
     elif "unknown_compute_peak" in tags:
@@ -151,6 +166,9 @@ def evaluate_file(
                 (ideal_compute_us / pipeline_eff) if ideal_compute_us is not None else ideal_hbm_us,
             )
             current_kernel_bound_us = tile.lower_bound_us
+            actual_tiling_source, fallback_tiling_source, optimal_tiling_source, current_tiling_kind = tiling_source_split(
+                tile.source
+            )
             current_theoretical_tflops = (
                 true_flops / current_kernel_bound_us / 1_000_000.0 if current_kernel_bound_us > 0 else 0.0
             )
@@ -203,6 +221,10 @@ def evaluate_file(
                 "quant_aux_bytes": quant_spec.aux_bytes,
                 "quant_notes": quant_spec.notes,
                 "kernel_tiling_source": tile.source,
+                "actual_tiling_source": actual_tiling_source,
+                "fallback_tiling_source": fallback_tiling_source,
+                "optimal_tiling_source": optimal_tiling_source,
+                "current_tiling_kind": current_tiling_kind,
                 "runtime_kb_id": tile.runtime_kb_id,
                 "runtime_kb_file": tile.runtime_kb_file,
                 "tiling_enable": tile.tiling_enable,

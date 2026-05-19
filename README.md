@@ -1,17 +1,18 @@
 # Kernel Evaluation
 
-This repository contains a small evaluator for estimating Ascend operator kernel cost from exported profiling CSV files. MatMul is the first implemented operator family.
+This repository contains a small evaluator for estimating Ascend operator kernel cost from exported profiling CSV files. MatMul is the most detailed implemented operator family; attention-family profiling rows are also supported with a conservative analytic fallback model.
 
 ## Scope
 
 - Hardware targets: Ascend 910B4 and Ascend 910C.
 - Profiling inputs: `example_profilings/910B4` and `example_profilings/910C`.
 - Main tool: `tools/eval_ops.py`.
-- Design notes: `matmul_eval_design.md` and `matmul_eval_design_zh.md`.
+- Architecture notes: `docs/architecture.md`.
+- MatMul design notes: `docs/matmul_eval_design.md` and `docs/matmul_eval_design_zh.md`.
 
 ## Information Sources
 
-- Hardware note: `info.md`.
+- Hardware note: `docs/info.md`.
 - Profiling samples: `example_profilings`.
 - Local ops-nn MatMulV3 source snapshot:
   - `ops-nn-master-matmul-mat_mul_v3`
@@ -28,12 +29,21 @@ The local ops-nn kernel code was taken from the upstream GitCode `cann/ops-nn` m
 - `tools/op_eval/common.py`: shared config, dtype, format, shape, and numeric helpers.
 - `tools/op_eval/profiling.py`: profiling CSV file discovery, default row filtering, and CSV report writing.
 - `tools/op_eval/api.py`: generic `estimate_op(...)` dispatcher for future operator families.
-- `tools/op_eval/cli.py`: shared CLI orchestration. It currently dispatches to MatMul evaluation.
+- `tools/op_eval/cli.py`: shared CLI orchestration for MatMul and attention-family evaluation.
 - `tools/matmul_eval/api.py`: public MatMul cost API, including `estimate_matmul(...)`.
 - `tools/matmul_eval/common.py`: MatMul specs, tile result structs, and MatMul shape inference.
 - `tools/matmul_eval/kernel_model.py`: MatMul tiling/runtime_kb/advanced_tiling/Stream-K/full-load model.
 - `tools/matmul_eval/quant_model.py`: low-bit MatMul mode, granularity, dequant, and traffic model.
 - `tools/matmul_eval/evaluator.py`: MatMul profiling-row evaluation, summaries, and calibration suggestions.
+- `tools/attention_eval/api.py`: public attention cost API, including `estimate_attention(...)`.
+- `tools/attention_eval/common.py`: attention-family row detection and Q/K/V shape inference.
+- `tools/attention_eval/evaluator.py`: attention profiling-row evaluation and summaries.
+
+Attention support currently parses `FusedInferAttentionScore` and related attention names from profiling CSVs, estimates QK/PV FLOPs, softmax/vector work, and minimum HBM traffic, and marks `actual_tiling_source=unavailable_ops_transformer_replay`. This keeps the same semantic split as MatMul: actual tiling replay is preferred when available, analytic fallback is explicit when it is not, and the physical lower bound is kept separate.
+
+If a local `ops-transformer-master` checkout is present, attention rows also report `actual_tiling_source=ops_transformer_source_strategy_replay`, `tiling_strategy`, and the relevant source file. This is a source-derived strategy replay, not an exact binary tiling-data replay.
+
+For attention reports, `estimated_us` is the current-kernel estimate and `ideal_lower_bound_us` remains the physical lower-bound reference. The current-kernel estimate includes source-visible tile constants, occupancy, traffic, sync, latency-floor, and template-overhead terms.
 
 ## Useful Upstream Operators
 
@@ -88,4 +98,15 @@ python3 tools/eval_ops.py \
   --config configs/ascend_910c.json \
   --output matmul_eval_report_910c.csv \
   --unresolved-output matmul_eval_unresolved_910c.csv
+```
+
+Attention-family rows:
+
+```bash
+python3 tools/eval_ops.py \
+  --op-kind attention \
+  --profiling example_profilings/910C \
+  --config configs/ascend_910c.json \
+  --output attention_eval_report_910c.csv \
+  --unresolved-output attention_eval_unresolved_910c.csv
 ```

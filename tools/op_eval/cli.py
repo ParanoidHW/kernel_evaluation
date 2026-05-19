@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-from matmul_eval.evaluator import print_calibration_suggestions, print_summary
-
 from .api import evaluate_profiling
 from .profiling import write_csv
 
@@ -27,8 +25,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--op-kind",
         default="matmul",
-        choices=["matmul"],
-        help="Operator family to evaluate. Currently only matmul is implemented.",
+        choices=["matmul", "attention"],
+        help="Operator family to evaluate. Default: matmul.",
     )
     parser.add_argument("--output", help="Write detailed resolved report CSV.")
     parser.add_argument("--unresolved-output", help="Write unresolved rows CSV.")
@@ -55,10 +53,19 @@ def main(argv: list[str]) -> int:
     rows = report.rows
     unresolved = report.unresolved
 
+    if args.op_kind == "attention":
+        from attention_eval.evaluator import print_summary
+    else:
+        from matmul_eval.evaluator import print_summary
+
     print_summary(rows, unresolved)
 
     suggestions: dict[str, Any] | None = None
     if args.suggest_calibration or args.calibration_output:
+        if args.op_kind != "matmul":
+            raise NotImplementedError("--suggest-calibration is currently implemented only for matmul")
+        from matmul_eval.evaluator import print_calibration_suggestions
+
         suggestions = print_calibration_suggestions(rows)
 
     if args.output:

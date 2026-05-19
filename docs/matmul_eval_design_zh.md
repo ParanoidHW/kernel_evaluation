@@ -228,7 +228,8 @@ HBM 估算考虑 L2：
 
 新增输出字段用于解释当前 kernel：
 
-- `kernel_tiling_source`、`tiling_strategy`、`full_load`、`l0c2out`。
+- `kernel_tiling_source`，以及显式语义拆分字段 `actual_tiling_source`、`fallback_tiling_source`、`optimal_tiling_source`、`current_tiling_kind`。
+- `tiling_strategy`、`full_load`、`l0c2out`。
 - `base_m/base_n/base_k`、`depth_a1/depth_b1`、`step_m/step_n/step_ka/step_kb`。
 - `runtime_kb_id/runtime_kb_file` 和解码后的 `tiling_split_core/tiling_full_load/tiling_fix_opti/tiling_special_opti`。
 - `current_kernel_bound_us/current_theoretical_tflops`：按当前 kernel tiling 的理论下界。
