@@ -1,60 +1,215 @@
 # Session Notes
 
+## 2026-05-22T02:44:38Z Workflow Start
+
+- Workflow skill used earlier: `kernel-eval-workflow`.
+- Scope: process current TODO by priority, starting with measurable evaluation gap analysis for existing profiling before changing kernel models.
+- User constraint: `duration_us < 10us` can be treated as launch-overhead dominated.
+- Large/occupied gap policy: exclude `duration_us < 10us`; focus on rows with `block_dim`/`mix_block_dim` close to `aic_num` or high `cube_utilization_pct`.
+- Commit policy at that point: default local commit after feature/bugfix completion unless user says not to commit.
+
+## 2026-05-22T02:44:38Z Gap Analysis Workflow
+
+- Added reusable large shape / occupied-core report post-processor: `tools/analyze_large_shape_gap.py`.
+- Default filters: `duration_us >= 10`, `block_dim` or `mix_block_dim >= 0.8 * aic_num`, or `cube_utilization_pct >= 70`.
+- Regenerated base 910B4/910C and `profiling_with_model_code` MatMul/Attention reports with matched platform configs.
+- Key result at that time:
+  - 910C attention large shape max relative error about `0.116`, p95 about `0.099`.
+  - Base 910C MatMul large shape max about `0.542`, mostly `MatMulV2 M=1` path.
+  - Base 910B4 attention large shape max about `0.259`.
+- High-priority findings:
+  - `GroupedMatmul` had many lower-bound violations because `group_list` values/routing are absent.
+  - ds3.2 `KvQuantSparseFlashAttention` had max relative error about `1.840` and lower-bound violations.
+  - qwen7b `MatMulV2` had lower-bound violation on all large-shape rows under then-current 910B4 assumptions.
+- Docs: wrote `docs/current_eval_gap_zh.md` and linked it from `docs/architecture.md`.
+
+## 2026-05-22T03:32:00Z GroupedMatmul Independent Evaluation
+
+- Continued from high-priority TODO: `GroupedMatmul` routing data missing.
+- Design: treat `GroupedMatmul` as an independent kernel family. Keep ordinary MatMul theoretical lower bound only as a compatibility/reference field, and add two explicit routing scenarios because `kernel_details.csv` does not expose `group_list`.
+- Model:
+  - Balanced scenario spreads tokens across `min(expert_count, M)` active experts.
+  - Extreme imbalance routes all tokens to one expert.
+  - Both scenarios charge active expert weight traffic, activation/output traffic, quant auxiliary bytes, Cube core work-tile occupancy, and dtype/quant compute peak where available.
+- Development:
+  - Added `tools/matmul_eval/gmm_model.py`.
+  - Added `--op-kind grouped_matmul`.
+  - Propagated GMM fields through CSV writer.
+  - Added large-shape GMM routing-bound summary.
+- Validation: `py_compile` passed for updated modules. GroupedMatmul reports generated for base 910B4, longcat/gemma on 910B4, and ds3.2 on 910C.
+- Results at this point:
+  - Base 910B4 large/occupied GMM bound error max `0.543`, p95 `0.473`, median `0.000`.
+  - longcat max `0.542`, p95 `0.513`, median `0.391`.
+  - gemma max/p95/median `0.000`.
+  - ds3.2 max `0.176`, p95 `0.165`, median `0.090`.
+- Review conclusion: this is not a fit. Above-bound rows are low-confidence residuals needing real `group_list` or GMM-specific scheduling/sync/merge evidence.
+- Docs updated: `docs/architecture.md`, `docs/matmul_eval_design_zh.md`, `docs/current_eval_gap_zh.md`, and `session.md`.
+
+## 2026-05-22T04:20:00Z GMM Source Review
+
+- Correction: `GroupedMatmul` implementation is in `ops-transformer/gmm/grouped_matmul`, not `ops-nn/matmul`.
+- Source review:
+  - Host tiling parses `groupType`, `groupListType`, `tuningConfigOptional`, `singleN`, and `usedCoreNum`.
+  - Quant path can `SetBlockDim(aicNum)`.
+  - Kernel `grouped_matmul.h` loops over `groupList`, skips empty groups, and schedules blocks across groups with `count % coreNum`.
+- Design update:
+  - Do not infer active experts from `Block Dim`.
+  - `Block Dim` indicates launched Cube cores for GMM, not non-empty expert count.
+- Model update:
+  - Keep balanced/extreme routing scenarios.
+  - Add a source-visible group scheduler term for expert counts greater than Cube cores.
+  - Use `gmm_routing_bound_error` as the large-shape error metric for GMM reports.
+- Validation:
+  - Regenerated longcat/gemma/ds3.2 grouped_matmul reports.
+  - Longcat bound max improved from about `0.542` to about `0.179`.
+  - Gemma remained `0.000`.
+  - DS3.2 remained about `0.176`.
+- Residual: DS3.2 INT8 GMM above-bound likely needs true `groupList`/`tuningConfigOptional` or exact quant adaptive sliding-window tiling replay.
+
+## Architecture Understanding
+
+- The repository is an Ascend profiling CSV kernel evaluator. Its target is interpretable kernel-aware estimation, not black-box fitting.
+- Main CLI entry: `tools/eval_ops.py`, forwarding into `tools/op_eval/cli.py`.
+- Library dispatch: `tools/op_eval/api.py`.
+- Shared helpers:
+  - `tools/op_eval/common.py`: config, dtype, shape, format, numeric helpers.
+  - `tools/op_eval/profiling.py`: CSV discovery and report writing.
+  - `tools/op_eval/types.py`: report container.
+- MatMul package:
+  - `tools/matmul_eval/common.py`: MatMul specs and shape/layout inference.
+  - `tools/matmul_eval/kernel_model.py`: runtime KB, advanced tiling heuristic, analytic fallback, ideal bounds.
+  - `tools/matmul_eval/quant_model.py`: quantized MatMul and ND2NZ helpers.
+  - `tools/matmul_eval/gmm_model.py`: GroupedMatmul routing bounds.
+  - `tools/matmul_eval/evaluator.py`: profiling row evaluation and report fields.
+- Attention package:
+  - `tools/attention_eval/common.py`: Attention row detection and Q/K/V shape inference.
+  - `tools/attention_eval/tiling_replay.py`: source-strategy replay.
+  - `tools/attention_eval/api.py`: current-kernel and ideal-bound cost estimates.
+  - `tools/attention_eval/evaluator.py`: profiling evaluation and summaries.
+
 ## Tiling Semantics
 
-- Actual kernel tiling should not be modeled as a free search when ops-nn provides deterministic op_tiling information.
-- The evaluator should prioritize real/op-derived tiling sources:
-  - `runtime_kb_exact`: MatMulV3 runtime_kb preset tiling matched by key.
-  - `advanced_tiling_replay` or current `advanced_tiling_heuristic`: replay/reconstruction of ops-nn advanced_tiling logic.
-- `analytic_search` is only a fallback for missing tiling information or unsupported/older operators, not evidence of the actual kernel tiling.
-- The report should split tiling semantics explicitly:
-  - `actual_tiling`: runtime_kb/op_tiling/advanced_tiling replay paths.
+- Actual kernel tiling should not be modeled as a free search when ops-nn or ops-transformer provides deterministic op/host tiling information.
+- Real/op-derived tiling sources are preferred:
+  - `runtime_kb_exact`: MatMulV3 runtime knowledge-base preset matched by key.
+  - `advanced_tiling_heuristic`: reconstruction of ops-nn advanced tiling logic.
+  - `ops_transformer_source_strategy_replay`: Attention source strategy identification, not exact binary tiling data.
+- `analytic_search` is only a fallback for missing tiling information or unsupported/older operators, not evidence of actual kernel tiling.
+- Reports should keep semantics separate:
+  - `actual_tiling`: runtime KB, op_tiling, advanced tiling, or source replay paths.
   - `fallback_tiling`: analytic search used when actual tiling is unknown.
-  - `optimal_tiling`: theoretical best-kernel bound search, separated from current-kernel estimation.
-- Future reports should expose whether the current-kernel estimate is based on actual tiling or fallback tiling so the confidence level is clear.
+  - `optimal_tiling`: theoretical best-kernel/physical lower-bound comparison.
+- `estimated_us` represents current-kernel estimate. `ideal_lower_bound_us` is a physical lower-bound reference and must not be treated as current-kernel time.
 
-## TODO
-- Refine matmul-like operator tiling. By default, estimation should use tiling options from https://gitcode.com/cann/ops-nn/tree/master/matmul
+## Attention Evaluator State
 
-- Continue refining attention-family operator costs from the `cann/ops-transformer` kernel implementations.
-- Source: https://gitcode.com/cann/ops-transformer
-- Target operators should include major attention variants implemented there, such as FlashAttention/paged attention/incremental attention/prompt attention if present in the kernel tree.
-- Keep the same modeling split used for MatMul: actual op_tiling or kernel replay first, analytic fallback only when real tiling is unavailable, and a separate optimal-kernel bound for comparison.
-- Shared parsing/reporting should live under `tools/op_eval`; attention-specific specs, tiling replay, and kernel cost models should live in `tools/attention_eval` rather than under `tools/matmul_eval`.
+- `tools/attention_eval` supports Q/K/V profiling-shape parsing, public `estimate_attention(...)`, profiling evaluation, CSV rows, and summaries.
+- `tools/op_eval` supports `op_kind="attention"` and CLI `--op-kind attention`.
+- With local `ops-transformer-master`, attention reports mark rows as `actual_tiling_source=ops_transformer_source_strategy_replay` and emit strategy/source-file fields.
+- Without source, attention falls back to `actual_tiling_source=unavailable_ops_transformer_replay`.
+- Source-strategy replay maps profiling Type/shape to ops-transformer strategy families: `FlashAttentionScore`, `FusedInferAttentionScore`, `PromptFlashAttention`, `IncreFlashAttention`, and paged/decode-like paths.
+- Current attention estimate keeps `ideal_lower_bound_us` separate. `estimated_us` includes:
+  - source-visible tile constants such as `Q_TILE_CEIL=128` and `MAX_KV_STACK_LEN=512`;
+  - occupancy efficiency;
+  - traffic amplification;
+  - workspace score traffic;
+  - sync overhead;
+  - latency floors;
+  - template overhead factors.
+- Optional-input traffic capping was added so static metadata/mask/aux shapes do not dominate GM traffic.
+- Per-SoC and per-kernel-family latency/template terms are split for FlashAttention vs FusedInferAttention and short/long prefill.
+- Latest validation notes in docs:
+  - 910B4 attention max relative error around `0.2946`, p95 `0.2380`, median `0.0965`.
+  - 910C attention max relative error around `0.1155`, p95 `0.0968`, median `0.0263`.
+- Current residuals:
+  - 910B4 `FusedInferAttentionScore` decode with `q_seq=1`, `kv_seq=288`, and large/custom `head_dim` remains an unsupported template path until exact host tiling/template replay is added.
+  - ds3.2 `KvQuantSparseFlashAttention` is the largest attention gap and needs a dedicated model from `ops-transformer-master/attention/kv_quant_sparse_flash_attention`.
 
-## Attention Evaluator Progress
+## Profiling Sample Mapping
 
-- Added `tools/attention_eval` with Q/K/V profiling-shape parsing, public `estimate_attention(...)`, profiling evaluation, CSV report rows, and summaries.
-- `tools/op_eval` now supports `op_kind="attention"` and CLI `--op-kind attention`.
-- Current attention model estimates QK/PV FLOPs, softmax/vector work, and minimum HBM bytes. With local `ops-transformer-master` present, it marks rows as `actual_tiling_source=ops_transformer_source_strategy_replay` and emits strategy/source-file fields; without source it falls back to `actual_tiling_source=unavailable_ops_transformer_replay`.
-- Existing samples contain `FusedInferAttentionScore` rows in both 910B4 and 910C profiling directories, so attention parsing can be validated before ops-transformer source replay is implemented.
-- Downloaded local `cann/ops-transformer` source snapshot to `ops-transformer-master`.
-- Added source-strategy replay for attention families by mapping profiling Type/shape to ops-transformer source strategies: FlashAttentionScore, FusedInferAttentionScore, PromptFlashAttention, IncreFlashAttention, and paged/decode-like paths.
-- Added 910B/910C-aware current-kernel attention estimate. It keeps `ideal_lower_bound_us` as the physical lower bound, while `estimated_us` now includes source-visible tile constants (`Q_TILE_CEIL=128`, `MAX_KV_STACK_LEN=512`), occupancy efficiency, traffic amplification, workspace score traffic, sync overhead, latency floors, and template overhead factors.
-- Changed kernel evaluation validation to prioritize maximum relative error, not median error. Added `.agents/skills/kernel-eval-iteration/` with a generic iteration workflow and analyzer script for all operator families.
-- Added optional-input traffic capping for attention auxiliary/mask tensors so static metadata shapes do not dominate GM traffic.
-- Added per-SoC and per-kernel-family attention latency/template terms: decode floors are split for FlashAttention vs FusedInferAttention, and short/long prefill template factors are split by operator family.
-- Current validation: `attention_eval_report_910b4.csv` has max relative error `0.2946`, p95 `0.2380`, median `0.0965`; `attention_eval_report_910c.csv` has max relative error `0.1155`, p95 `0.0968`, median `0.0263`.
-- Current accepted residual: 910B4 `FusedInferAttentionScore` decode with `q_seq=1`, `kv_seq=288`, `head_dim=8192` remains under-estimated. This is not an uninspected outlier; it is classified as an unsupported custom-head-dim incremental-attention template path until exact host tiling/template replay is added.
-- Next refinement should replay exact host tiling data from the C++ op_host contexts where possible; current attention replay deliberately does not claim exact binary tiling data.
+- `example_profilings/910B4/` contains base 910B4 profiling samples:
+  - `kernel_details3.csv`: longcat-like 910B4 sample.
+  - `kernel_details_gemma4.csv`: gemma 910B4 sample.
+  - `kernel_details_hyimage.csv`: hyimage 910B4 sample.
+  - `kernel_details_2.csv`: quant MatMul 910B4 sample.
+  - `kernel_details_pangu.csv`: pangu MatMulV3 910B4 sample.
+  - `kernel_details.csv`: small base sample with BatchMatMulV2.
+- `example_profilings/910C/` contains base 910C samples:
+  - `kernel_details4.csv`: 910C FusedInferAttention + MatMul/GMM.
+  - `kernel_details5.csv`: 910C FlashAttention + MatMul/GMM.
+- `example_profilings/profiling_with_model_code/` contains model-level samples:
+  - `ds3.2`: 910C model-level sample.
+  - `gemma`: 910B4 model-level sample.
+  - `longcat`: 910B4 model-level sample.
+  - `qwen7b`: qwen3/qwen7b sample with missing `Block Dim` fields; platform inferred from `Block Num`.
+- Added `example_profilings/README.md` documenting this mapping and the caveats.
 
-## Profiling With Model Code Platform Check
+## Platform Inference Rules
 
-- For Ascend/CANN profiling, platform inference should distinguish Cube and Vector block dimensions.
-- Cube-like operators (`MatMul`, `BatchMatMul`, `GroupedMatmul`, `QuantBatchMatmul`, Cube-heavy FA paths) should be compared with `aic_num`.
-- Vector-like operators (`Cast`, `Transpose`, `RotaryMul`, `Gather/Scatter`, activation, routing, fusion) should be compared with `aiv_num`.
-- Current新增网络判断：
-  - `ds3.2`: Cube max block dim `24`, Vector max block dim `48`, use `910C/A3`.
-  - `gemma`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`.
-  - `qwen7b`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`; previous 910C inference from residual fitting is not reliable.
-  - `longcat`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`.
+- For Ascend/CANN profiling, platform inference must distinguish Cube and Vector block dimensions.
+- Cube-like operators should be compared with `aic_num`: `MatMul`, `BatchMatMul`, `GroupedMatmul`, `QuantBatchMatmul`, and Cube-heavy FA paths.
+- Vector-like operators should be compared with `aiv_num`: `Cast`, `Transpose`, `RotaryMul`, `Gather/Scatter`, activation, routing, and many fusion ops.
+- 910B4 evidence:
+  - Cube max around `20`.
+  - Vector max around `40`.
+- 910C/A3 evidence:
+  - Cube max around `24`.
+  - Vector max around `48`.
+- Do not use full-file max `Block Dim`/`Block Num` directly, because Vector, communication, or malformed export fields can dominate the global maximum.
 
-## Current MatMul/FA Tail Findings
+Current model-level platform conclusions:
 
-- Added GroupedMatmul-specific logical-shape parsing: the first dimension of `FRACTAL_NZ` weight is expert count, not a regular batch dimension. Logical FLOPs now use total routed tokens rather than `expert_count * tokens`.
-- Added independent `grouped_matmul` evaluation entry. The report keeps ordinary MatMul compatibility fields but adds routing scenario fields for balanced experts and extreme load imbalance. Without `group_list`, this is an explanatory bound model, not an exact replay.
-- Corrected GMM source location to `ops-transformer/gmm/grouped_matmul`. Source review shows kernel-side groupList iteration, empty-group skip, and `count % coreNum` scheduling; `Block Dim` cannot infer active experts.
-- Current GMM validation after source-visible scheduler update: Gemma large/occupied rows are all within routing bounds; Longcat max bound error is about 18%; DS3.2 INT8 GMM is above by about 18%. These above-bound rows remain low confidence until real `groupList`, `groupListType`, `tuningConfigOptional`, sync/merge, or exact quant adaptive sliding-window tiling details are available.
-- `ds3.2` matmul largest remaining tail is tiny `MatMul M=4,N=128,K=128`, where the analytic lower bound is below observed kernel latency by two orders of magnitude. This points to small-kernel launch/template/minimum-execution overhead; update only with source-visible template or launch evidence.
-- `ds3.2` FA tail is `KvQuantSparseFlashAttention` with `q_seq=128, kv_seq=1, head_dim=576`, currently over-estimated and marked as specialized low-confidence path. Need dedicated `kv_quant_sparse_flash_attention` source/tiling modeling rather than generic FA cost.
-- `gemma`, `qwen7b`, and `longcat` ordinary FA tails are mostly decode/short-prefill fixed overhead and are materially smaller than the specialized `KvQuantSparseFlashAttention` tail.
+- `ds3.2`: Cube max `24`, Vector max `48`; use 910C/A3 config.
+- `gemma`: Cube max `20`, Vector max `40`; use 910B4 config.
+- `longcat`: Cube max `20`, Vector max `40`; use 910B4 config.
+- `qwen3-7b` / `qwen7b`: original `kernel_details.csv` lacks `Block Dim`/`Mix Block Dim` but has `Block Num`/`Mix Block Num`; `MatMulV2` rows have `Block Num` mostly `20` and some `19`, `FusedInferAttentionScore` rows have `Block Num=16` and `Mix Block Num=32`, and Vector-like rows reach `Block Num=40`. By BlockDim/BlockNum principle this maps to 910B4, not 910C.
+
+## Current Evaluation Findings
+
+- `eval_results/LATEST` previously pointed to a partial GMM-only summary under commit `17ddb4e`.
+- Current working tree HEAD observed during review was `4e820be`; therefore old root-level CSV reports without commit-scoped directory were ambiguous.
+- Old root-level CSV files under `eval_results/` were cleaned because they lacked stable commit correspondence.
+- `eval_results/README.md` now states that future results should live under `<UTC时间>_<commit>/` subdirectories.
+- Remaining committed/kept evaluation snapshot:
+  - `eval_results/20260522T043350Z_17ddb4e/eval_summary.csv`
+  - `eval_results/20260522T043350Z_17ddb4e/metadata.txt`
+  - `eval_results/LATEST`
+- Historical pre-cleanup precision observations retained as background in `eval_results/README.md`:
+  - 910C attention was strongest: max about `11.6%`, p95 about `9.9%`.
+  - 910B4 attention main tail was FIA decode.
+  - 910C MatMul main tail was `MatMulV2` small-M long-K/N decode-like path, max about `54%`.
+  - ds3.2 `KvQuantSparseFlashAttention` had very large error and lower-bound violations.
+  - qwen3/qwen7b `MatMulV2` under 910B4 inferred config had all 483 rows with `ideal_lower_bound_us > duration_us`; platform inference still points to 910B4, but model/HBM/storage/path assumptions are not reliable for calibration.
+
+## Current MatMul/GMM/FA Tail Findings
+
+- `GroupedMatmul` logical-shape parsing treats the first dimension of `FRACTAL_NZ` weight as expert count, not a regular batch dimension.
+- Logical FLOPs use total routed tokens rather than `expert_count * tokens`.
+- Independent `grouped_matmul` entry keeps ordinary MatMul compatibility fields but adds routing scenario fields for balanced experts and extreme load imbalance.
+- Without real `group_list`, GMM is an explanatory bound model, not exact replay.
+- GMM source location is `ops-transformer/gmm/grouped_matmul`; not `ops-nn/matmul`.
+- Source review supports groupList iteration, empty-group skip, and `count % coreNum` scheduling.
+- `Block Dim` cannot infer active experts.
+- Current GMM validation status:
+  - Gemma large/occupied rows are all within routing bounds.
+  - Longcat has above-bound rows; latest historical numbers vary depending on report generation version, but this remains a low-confidence residual.
+  - DS3.2 INT8 GMM remains above-bound by about `18%` in historical summaries.
+- `ds3.2` MatMul remaining tail includes small/tiny shapes where analytic lower bound is far below observed kernel latency, pointing to launch/template/minimum-execution overhead.
+- `ds3.2` FA tail is `KvQuantSparseFlashAttention` with specialized sparse/quant behavior; needs dedicated source/tiling modeling.
+- `gemma`, `qwen3/qwen7b`, and `longcat` ordinary FA tails are mostly decode/short-prefill fixed overhead and are smaller than the specialized `KvQuantSparseFlashAttention` tail.
+
+## Documentation And Repository State Updates
+
+- Added `example_profilings/README.md` with sample/report mapping, platform caveats, and qwen/qwen3 inference notes.
+- Updated `eval_results/README.md` with report retention policy, historical precision background, main conclusions, and unresolved categories.
+- Changed `.gitignore` to ignore `example_profilings/*` while allowing `example_profilings/README.md` to be tracked.
+- Existing `.gitignore` also contains `/ops-nn`; that change was present during this session and was preserved.
+- Cleaned old root-level CSV files from `eval_results/`, keeping only commit-scoped snapshot files and metadata.
+
+## Open Priorities
+
+- Regenerate a complete, commit-scoped evaluation snapshot for current HEAD using matched SoC configs.
+- Build a dedicated `KvQuantSparseFlashAttention` evaluator from `ops-transformer-master/attention/kv_quant_sparse_flash_attention`.
+- Investigate qwen3/qwen7b `MatMulV2` lower-bound violations under 910B4: platform inference says 910B4, but HBM bandwidth, profiling units, shape/storage interpretation, or MatMulV2 kernel path assumptions are inconsistent.
+- Refine `MatMulV2 M=1` long-K/N path from source/tiling, not per-shape fitting.
+- Continue GMM convergence only with real `groupList`, `groupListType`, `tuningConfigOptional`, or exact quant/GMM tiling evidence.

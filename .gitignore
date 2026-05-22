@@ -1,7 +1,9 @@
 # Large local inputs and extracted operator sources.
-/example_profilings/
+/example_profilings/*
+!/example_profilings/README.md
 /ops-nn-master-matmul-*/
 /ops-transformer-master/
+/ops-nn
 /ops-math-master/
 /ops-cv-master/
 /*.zip
