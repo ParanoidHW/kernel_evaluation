@@ -15,6 +15,7 @@
 ## 目录说明
 
 - `tools/eval_ops.py`：统一 CLI 入口
+- `tools/annotate_profiling.py`：在原 profiling CSV 基础上追加评估值列
 - `tools/op_eval/`：共享配置、profiling 解析、API 和报告逻辑
 - `tools/matmul_eval/`：MatMul / GroupedMatmul 解析、tiling、成本模型和报告
 - `tools/attention_eval/`：Attention 解析、source strategy replay、成本模型和报告
@@ -83,6 +84,17 @@ python3 tools/eval_ops.py \
   --output grouped_matmul_eval_report_910b4.csv \
   --unresolved-output grouped_matmul_eval_unresolved_910b4.csv
 ```
+
+原 CSV 增列：
+
+```bash
+python3 tools/annotate_profiling.py \
+  --profiling example_profilings/910B4/kernel_details.csv \
+  --config configs/ascend_910b4.json \
+  --output kernel_details_with_eval.csv
+```
+
+该入口会在原 CSV 基础上新增 `kernel_eval_value` 列。MatMul/Attention 行写入 `estimated_us`，GroupedMatmul 行写入 routing bounds 的区间均值；非 MatMul/GMM/Attention 行留空，后续算子族补齐后再处理。
 
 ## 结果与基线
 

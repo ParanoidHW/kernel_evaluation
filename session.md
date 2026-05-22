@@ -136,6 +136,16 @@
 - 删除旧结论中“qwen MatMul 全量 lower-bound violation”和“QSFA 严重 lower-bound violation”的当前问题表述，改为记录它们已经分别收敛到当前残留。
 - 当前 gap 优先级更新为：ds3.2 `QuantBatchMatmulV3` small-M/Weight-NZ/dequant，base `MatMulV2 M=1`，gemma/base FIA decode，GMM routing above-bound，QSFA exact replay residual。
 
+## 2026-05-22 profiling CSV 增列工具
+
+本次新增 `tools/annotate_profiling.py`：
+
+- 输入单个 profiling CSV 和硬件配置 JSON。
+- 在原 CSV 基础上新增 `kernel_eval_value` 列并写出新 CSV。
+- MatMul/Attention 行写入当前工具的 `estimated_us`。
+- GroupedMatmul 行默认写入 routing bounds 的区间均值；也保留 `--gmm-value bounds` 可输出 `[low,high]`。
+- 非 MatMul/GMM/Attention 行留空，作为后续新增算子族的扩展点。
+
 ## 后续要求
 
 - 后续除非用户另行说明，每完成一个新增特性/功能都需要本地提交

@@ -91,6 +91,9 @@ python3 tools/eval_ops.py --op-kind attention ...
 tools/eval_ops.py
   -> CLI 入口
 
+tools/annotate_profiling.py
+  -> 在单个 profiling CSV 原始行上追加 kernel_eval_value 列
+
 tools/op_eval/
   -> 通用配置、profiling 文件发现、CSV 输出、API 分发
 
@@ -168,6 +171,14 @@ CLI 参数在 `tools/op_eval/cli.py`：
 - `--include-allgather`
 
 `--suggest-calibration` 当前只支持 matmul。
+
+另有轻量增列入口 `tools/annotate_profiling.py`：
+
+- 输入单个 profiling CSV 和硬件配置 JSON。
+- 输出保留原 CSV 所有列，并追加 `kernel_eval_value`。
+- MatMul/Attention 行写入当前 `estimated_us`。
+- GroupedMatmul 行默认写入 routing bounds 区间均值；可通过 `--gmm-value bounds` 改为输出 `[low,high]`。
+- 非 MatMul/GMM/Attention 行留空，后续算子族实现后再扩展。
 
 ## actual / fallback / optimal 语义
 
