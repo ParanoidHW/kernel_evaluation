@@ -1,106 +1,67 @@
-# Kernel Evaluation
+# Kernel 评估工具
 
-This repository contains a small evaluator for estimating Ascend operator kernel cost from exported profiling CSV files. MatMul is the most detailed implemented operator family; attention-family profiling rows are also supported with a conservative analytic fallback model.
+本仓库用于根据导出的 profiling CSV 估算昇腾算子 kernel 耗时。当前重点覆盖 `MatMul`、`GroupedMatmul` 和 Attention 家族，设计原则是从 kernel 实现、tiling 逻辑和硬件约束出发建立可解释模型，而不是对历史样本做黑盒拟合。
 
-## Scope
+## 仓库范围
 
-- Hardware targets: Ascend 910B4 and Ascend 910C.
-- Profiling inputs: `example_profilings/910B4` and `example_profilings/910C`.
-- Main tool: `tools/eval_ops.py`.
-- Architecture notes: `docs/architecture.md`.
-- MatMul design notes: `docs/matmul_eval_design.md` and `docs/matmul_eval_design_zh.md`.
+- 硬件平台：`Ascend 910B4`、`Ascend 910B4-1`、`Ascend 910C`
+- profiling 样本：`example_profilings/`
+- 评估入口：`tools/eval_ops.py`
+- 架构说明：`docs/architecture.md`
+- MatMul 设计文档：`docs/matmul_eval_design_zh.md`
+- Attention 设计文档：`docs/attention_kernel_eval_design.md`
 
-## Information Sources
+## 目录说明
 
-- Hardware note: `docs/info.md`.
-- Profiling samples: `example_profilings`.
-- Local ops-nn MatMulV3 source snapshot:
-  - `ops-nn-master-matmul-mat_mul_v3`
-  - `ops-nn-master-matmul-batch_mat_mul_v3`
-- Upstream ops-nn matmul directory:
-  - https://gitcode.com/cann/ops-nn/tree/master/matmul
-  - Verified git commit during analysis: `f84b7eb83ee9f15df633d9fa9ca676bda83e11a0`.
+- `tools/eval_ops.py`：统一 CLI 入口
+- `tools/op_eval/`：共享配置、profiling 解析、API 和报告逻辑
+- `tools/matmul_eval/`：MatMul / GroupedMatmul 解析、tiling、成本模型和报告
+- `tools/attention_eval/`：Attention 解析、source strategy replay、成本模型和报告
+- `configs/`：平台配置和模型相关参数
+- `docs/`：架构、设计、误差分析和硬件补充文档
+- `example_profilings/`：已有 profiling 样本和说明
+- `eval_results/`：各轮基线刷新后的汇总结果
 
-The local ops-nn kernel code was taken from the upstream GitCode `cann/ops-nn` matmul tree. If the local snapshot and upstream diverge, prefer checking the exact upstream commit and then updating local source references deliberately.
+## 建模约束
 
-## Tool Layout
+- `estimated_us` 表示当前 kernel 路径的运行时间估计。
+- `ideal_lower_bound_us` 只表示物理下界，不代表当前 kernel 一定能达到。
+- 新增或修改模型项时，必须能对应到源码实现、tiling 分支或硬件执行机制。
+- 不允许为了拟合个别样本引入无关超参、校准项或经验补丁。
 
-- `tools/eval_ops.py`: generic operator profiling CLI entry point.
-- `tools/op_eval/common.py`: shared config, dtype, format, shape, and numeric helpers.
-- `tools/op_eval/profiling.py`: profiling CSV file discovery, default row filtering, and CSV report writing.
-- `tools/op_eval/api.py`: generic `estimate_op(...)` dispatcher for future operator families.
-- `tools/op_eval/cli.py`: shared CLI orchestration for MatMul and attention-family evaluation.
-- `tools/matmul_eval/api.py`: public MatMul cost API, including `estimate_matmul(...)`.
-- `tools/matmul_eval/common.py`: MatMul specs, tile result structs, and MatMul shape inference.
-- `tools/matmul_eval/kernel_model.py`: MatMul tiling/runtime_kb/advanced_tiling/Stream-K/full-load model.
-- `tools/matmul_eval/quant_model.py`: low-bit MatMul mode, granularity, dequant, and traffic model.
-- `tools/matmul_eval/evaluator.py`: MatMul profiling-row evaluation, summaries, and calibration suggestions.
-- `tools/attention_eval/api.py`: public attention cost API, including `estimate_attention(...)`.
-- `tools/attention_eval/common.py`: attention-family row detection and Q/K/V shape inference.
-- `tools/attention_eval/evaluator.py`: attention profiling-row evaluation and summaries.
+## 当前重点能力
 
-Attention support currently parses `FusedInferAttentionScore` and related attention names from profiling CSVs, estimates QK/PV FLOPs, softmax/vector work, and minimum HBM traffic, and marks `actual_tiling_source=unavailable_ops_transformer_replay`. This keeps the same semantic split as MatMul: actual tiling replay is preferred when available, analytic fallback is explicit when it is not, and the physical lower bound is kept separate.
+### MatMul / GroupedMatmul
 
-If a local `ops-transformer-master` checkout is present, attention rows also report `actual_tiling_source=ops_transformer_source_strategy_replay`, `tiling_strategy`, and the relevant source file. This is a source-derived strategy replay, not an exact binary tiling-data replay.
+- shape / dtype / format 解析
+- runtime knowledge-base 命中
+- advanced tiling 近似
+- fallback analytic search
+- GroupedMatmul 路由上下界建模
+- 量化 MatMul 路径支持
 
-For attention reports, `estimated_us` is the current-kernel estimate and `ideal_lower_bound_us` remains the physical lower-bound reference. The current-kernel estimate includes source-visible tile constants, occupancy, traffic, sync, latency-floor, and template-overhead terms.
+### Attention
 
-## Useful Upstream Operators
+- Q/K/V shape 解析
+- QK/PV FLOPs 与 vector 工作量估算
+- HBM 最小流量与当前 kernel 流量放大
+- `ops-transformer` source strategy replay
+- FIA / FA / PFA / IFA / QSFA 路径支持
 
-The upstream `matmul` tree contains additional operator implementations that can refine this evaluator beyond plain MatMulV3:
+## 常用命令
 
-- `mat_mul_v3` and `batch_mat_mul_v3`: primary host tiling, runtime_kb, advanced tiling, Stream-K, full-load, and kernel template references.
-- `quant_batch_matmul_v3` and `quant_batch_matmul_v4`: low-bit matmul, per-token/per-channel/per-group/per-block, FP8/INT4/INT8, and dequant-related modeling references.
-- `weight_quant_batch_matmul_v2`: weight-only quantization, Weight-NZ handling, split-K, fixpipe, and low-bit weight packing references.
-- `fused_mat_mul` and `fused_quant_mat_mul`: fused epilogue overhead, activation/bias fusion, and fused quant matmul references.
-- `transpose_batch_mat_mul`: transpose/einsum-style batch matmul tiling and layout handling references.
-- `matmul_compress`, `convert_weight_to_int4_pack`, and `rotate_quant`: preprocessing and compressed/packed weight path references.
-
-## Example Commands
-
-Single-kernel API:
-
-```bash
-PYTHONPATH=tools python3 -c 'from matmul_eval import estimate_matmul; r = estimate_matmul(1024, 4096, 4096, "DT_BF16", config_path="configs/ascend_910c.json"); print(r.flops_cost_us, r.memory_access_us, r.total_us, r.bound_type)'
-```
-
-Generic operator API:
-
-```bash
-PYTHONPATH=tools python3 -c 'from op_eval import estimate_op; r = estimate_op("MatMulV3", 1024, 4096, 4096, "DT_BF16", config_path="configs/ascend_910c.json"); print(r.to_dict())'
-```
-
-The stable public cost fields are `flops_cost_us`, `memory_access_us`, `total_us`, and `bound_type`. `bound_type` is the end-to-end dominant bound (`compute_bound`, `memory_access_bound`, `launch_bound`, `format_bound`, or `balanced_bound`); `kernel_bound_type` keeps the compute-vs-memory kernel-only classification.
-
-Batch profiling API:
-
-```bash
-PYTHONPATH=tools python3 -c 'from op_eval import evaluate_profiling; r = evaluate_profiling("example_profilings/910B4", config_path="configs/ascend_910b4.json"); print(r.resolved_count, r.unresolved_count)'
-```
-
-`evaluate_profiling(...)` is the library entry point used by the CLI and intended for upper-layer whole-network evaluators. It returns a `ProfilingEvaluation` object with `rows`, `unresolved`, `resolved_count`, `unresolved_count`, and `to_dict()`.
-
-910B4:
+MatMul：
 
 ```bash
 python3 tools/eval_ops.py \
+  --op-kind matmul \
   --profiling example_profilings/910B4 \
   --config configs/ascend_910b4.json \
   --output matmul_eval_report_910b4.csv \
   --unresolved-output matmul_eval_unresolved_910b4.csv
 ```
 
-910C:
-
-```bash
-python3 tools/eval_ops.py \
-  --profiling example_profilings/910C \
-  --config configs/ascend_910c.json \
-  --output matmul_eval_report_910c.csv \
-  --unresolved-output matmul_eval_unresolved_910c.csv
-```
-
-Attention-family rows:
+Attention：
 
 ```bash
 python3 tools/eval_ops.py \
@@ -110,3 +71,20 @@ python3 tools/eval_ops.py \
   --output attention_eval_report_910c.csv \
   --unresolved-output attention_eval_unresolved_910c.csv
 ```
+
+GroupedMatmul：
+
+```bash
+python3 tools/eval_ops.py \
+  --op-kind grouped_matmul \
+  --profiling example_profilings/910B4 \
+  --config configs/ascend_910b4.json \
+  --output grouped_matmul_eval_report_910b4.csv \
+  --unresolved-output grouped_matmul_eval_unresolved_910b4.csv
+```
+
+## 结果与基线
+
+- 最新汇总结果见 `eval_results/LATEST`
+- 历史刷新结果按时间戳和 commit 存在 `eval_results/<timestamp>_<commit>/`
+- 当前工作记录和关键结论见 `session.md`

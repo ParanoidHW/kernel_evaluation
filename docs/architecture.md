@@ -1,6 +1,6 @@
 # Kernel 评估工具架构
 
-本文是评估工具的架构入口。MatMul 详细建模说明见 `matmul_eval_design_zh.md`；Attention 当前迭代计划见 `attention_eval_iteration_plan.md`；当前 profiling 评估差距见 `current_eval_gap_zh.md`；硬件补充信息见 `info.md`。
+本文是评估工具的架构入口。MatMul 详细建模说明见 `matmul_eval_design_zh.md`；Attention 设计说明见 `attention_kernel_eval_design.md`；当前 profiling 评估差距见 `current_eval_gap_zh.md`；硬件补充信息见 `info.md`。
 
 ## 目标
 
