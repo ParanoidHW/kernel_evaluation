@@ -1,5 +1,44 @@
 # Session Notes
 
+## 2026-05-22T08:35:59Z qwen3-7b 910B4-1 Config And Baseline
+
+- User clarified that the qwen3-7b/qwen7b MatMulV2 lower-bound issue can be treated as a platform/configuration residual and that qwen3-7b should use a dedicated 910B4-1 config with 1.6 TB/s HBM bandwidth.
+- Added `configs/ascend_910b4_1.json`:
+  - `soc`: `Ascend910B4-1`.
+  - `aic_num`: 20, matching qwen `MatMulV2` `Block Num` evidence.
+  - `aiv_num`: 40, matching Vector-like qwen rows.
+  - `hbm_bandwidth_tbps`: 1.6, user-confirmed for qwen3-7b.
+  - Peak FLOPS, cache sizes, runtime KB paths, and existing 910B4 launch/pipeline terms are carried from `configs/ascend_910b4.json`.
+- Commit created for the config change:
+  - `83a39c6 [feat] add 910B4-1 qwen config`
+- Validation commands:
+  - `python3 -m compileall tools`
+  - `python3 tools/eval_ops.py --op-kind matmul --profiling example_profilings/profiling_with_model_code/qwen7b --config configs/ascend_910b4_1.json --output /tmp/kernel_eval_qwen_910b4_1/profiling_with_model_code_qwen7b_matmul_eval_910b4_1.csv --unresolved-output /tmp/kernel_eval_qwen_910b4_1/profiling_with_model_code_qwen7b_matmul_unresolved_910b4_1.csv`
+  - `python3 tools/eval_ops.py --op-kind attention --profiling example_profilings/profiling_with_model_code/qwen7b --config configs/ascend_910b4_1.json --output /tmp/kernel_eval_qwen_910b4_1/profiling_with_model_code_qwen7b_attention_eval_910b4_1.csv --unresolved-output /tmp/kernel_eval_qwen_910b4_1/profiling_with_model_code_qwen7b_attention_unresolved_910b4_1.csv`
+  - `python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/qwen7b_matmul_eval_910b4_1.csv /tmp/qwen7b_attention_eval_910b4_1.csv`
+- Incremental eval snapshot:
+  - `eval_results/20260522T083559Z_83a39c6/eval_summary.csv`
+  - `eval_results/20260522T083559Z_83a39c6/metadata.txt`
+  - `eval_results/LATEST` now points to `20260522T083559Z_83a39c6`.
+- qwen3-7b/qwen7b MatMulV2 results under 910B4-1:
+  - rows/evaluated/large: 483/483/483.
+  - lower-bound violations: 0, down from 483/483 under historical 0.8 TB/s `910b4_inferred`.
+  - large max relative error: `0.3575`.
+  - p95: `0.3426`.
+  - median: `0.2848`.
+  - top tail: line 1396, `MatMulV2 M=1,N=4096,K=11008`, duration `92.72us`, estimate `59.574us`, diagnosis `fallback_tiling|small_m_overhead|memory_bound`.
+- qwen3-7b/qwen7b Attention results under 910B4-1:
+  - rows/evaluated/large: 96/96/96.
+  - lower-bound violations: 0.
+  - large max relative error: `0.4681`.
+  - p95: `0.4586`.
+  - median: `0.4164`.
+  - top tail remains `FusedInferAttentionScore` decode with `q_seq=1, kv_seq=6, head_dim=128`, estimate `14.0us` versus measured about `26us`.
+- Conclusion:
+  - The qwen MatMul all-row lower-bound violation was a platform HBM configuration problem, not a kernel-model calibration target.
+  - Remaining qwen MatMul error is a real `MatMulV2 M=1` small-M/GEMV-like fallback tiling issue and should be handled only after checking MatMulV2 source/tiling path.
+  - qwen Attention is unchanged in practice by the HBM update and remains a decode launch/latency-floor residual.
+
 ## 2026-05-22T02:44:38Z Workflow Start
 
 - Workflow skill used earlier: `kernel-eval-workflow`.

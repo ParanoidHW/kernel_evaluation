@@ -67,6 +67,7 @@ GMM 的实现依据来自 `ops-transformer/gmm/grouped_matmul`，不是 `ops-nn/
 配置文件按硬件目标拆分：
 
 - `configs/ascend_910b4.json`：20 个 AI Core，0.8 TB/s HBM，无 HF32 BF16/FP16 峰值 240 TFLOPS。
+- `configs/ascend_910b4_1.json`：qwen3-7b/qwen7b 专用 910B4-1 配置，20 个 AI Core、40 个 Vector Core，HBM 带宽为用户确认的 1.6 TB/s；该配置只表达硬件平台差异，不改变 MatMulV2 kernel 建模逻辑。
 - `configs/ascend_910c.json`：从 910C profiling 的 Block Dim 推断 24 个 AI Core，1.6 TB/s HBM，无 HF32 BF16/FP16 峰值 400 TFLOPS。
 
 对新增昇腾 profiling，如果 README 或元数据没有明确平台，可用 `Block Dim`/`Block Num` 做初步交叉判断：

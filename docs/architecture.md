@@ -130,6 +130,7 @@ attention_eval.evaluator
 硬件和校准假设位于 `configs/`：
 
 - `configs/ascend_910b4.json`：910B4 AI Core 数、HBM 带宽、cache 假设、峰值吞吐、MatMul runtime knowledge-base 路径和校准项。
+- `configs/ascend_910b4_1.json`：qwen3-7b/qwen7b 专用 910B4-1 配置，保留 20 AIC/40 AIV 的 910B4 BlockNum 证据，但使用用户确认的 1.6 TB/s HBM。
 - `configs/ascend_910c.json`：910C 可见设备假设、峰值吞吐、advanced MatMul tiling 设置和校准项。
 
 拿到更可靠的硬件或 CANN platform 数据后，应优先更新配置值，避免把 per-shape 拟合常量写入模型代码。
