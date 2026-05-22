@@ -23,6 +23,13 @@ ATTENTION_TYPE_TOKENS = (
 
 @dataclass(frozen=True)
 class AttentionSpec:
+    """Logical attention problem reconstructed from profiling shapes.
+
+    The evaluator normalizes many CANN attention variants into Q/K/V sequence,
+    head and element counts so the cost model can reason about QK/PV compute,
+    softmax/vector work, auxiliary metadata, output size and MQA/GQA behavior.
+    """
+
     batch: int
     q_heads: int
     kv_heads: int
@@ -97,6 +104,16 @@ def infer_attention_spec(
     *,
     kernel_type: str,
 ) -> AttentionSpec | None:
+    """Infer an AttentionSpec from the first Q/K/V inputs of a profiling row.
+
+    The profiling CSV does not expose a single canonical layout for all
+    attention kernels. This parser recognizes common `[B,H,S,D]`, `[B,S,D]`,
+    `[S,D]` and vector-like encodings, caps oversized static mask/aux tensors
+    to the active score window, and records a variant label from the kernel
+    type. Rows that cannot provide Q/K/V shape semantics return `None` and are
+    emitted to the unresolved report.
+    """
+
     if len(input_shapes) < 3:
         return None
     q_shape, k_shape, v_shape = input_shapes[0], input_shapes[1], input_shapes[2]

@@ -23,7 +23,12 @@ from .runtime_kb import load_runtime_kb
 
 @dataclass(frozen=True)
 class MatmulCostEstimate:
-    """Public cost estimate returned by the matmul evaluator API."""
+    """Public cost estimate returned by the matmul evaluator API.
+
+    The object intentionally keeps both user-facing totals and intermediate
+    components. Reports use these fields to explain whether a row is compute,
+    memory, launch, format, quant, or fallback-tiling dominated.
+    """
 
     spec: MatmulSpec
     dtype: str
@@ -128,8 +133,15 @@ def estimate_matmul_cost(
 ) -> MatmulCostEstimate:
     """Estimate one matmul kernel from a logical spec and data type.
 
-    The returned `flops_cost_us`, `memory_access_us`, `total_us`, and
-    `bound_type` are the stable public fields for external callers.
+    `spec` is already the logical GEMM reconstructed from profiling
+    shape/layout fields. This function then selects the best available kernel
+    tiling source, applies quantization/format/launch terms, and returns the
+    current-kernel estimate. The result is not the ideal physical lower bound;
+    `tile.source` and report fields identify whether the estimate came from
+    runtime KB, an ops-nn tiling replay approximation, or analytic fallback.
+
+    Stable public fields for external callers are `flops_cost_us`,
+    `memory_access_us`, `total_us`, and `bound_type`.
     """
 
     resolved_config = _resolve_config(config, config_path)

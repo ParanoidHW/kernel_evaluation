@@ -34,6 +34,14 @@ def storage_element_counts(spec: MatmulSpec) -> tuple[int, int, int]:
 
 
 def l2_aware_gm_bytes(gm_bytes_min: int, gm_bytes_tiled_raw: int, config: dict[str, Any]) -> int:
+    """Estimate effective GM traffic after possible L2 reuse.
+
+    The tiling model first computes a pessimistic raw traffic count as if every
+    tile reload came from GM. This helper reduces only the repeated portion
+    when the problem can plausibly fit in L2, keeping `gm_bytes_min` as the
+    hard floor.
+    """
+
     l2_bytes = int(config.get("l2_bytes", 0))
     if l2_bytes > 0 and gm_bytes_min <= l2_bytes:
         return gm_bytes_min
@@ -210,6 +218,13 @@ def advanced_stream_k_tile(
     kernel_type: str,
     kind: str,
 ) -> TileEstimate:
+    """Estimate advanced-tiling stream-K variants.
+
+    Stream-K splits long K work across cores when the M/N tile count cannot
+    occupy the device well. The model keeps this path explicit because it adds
+    reduction/output traffic that differs from ordinary M/N tiling.
+    """
+
     aic_num = int(config["aic_num"])
     elem_size = dtype_size(dtype)
     out_size = dtype_size(output_dtype)
@@ -628,6 +643,15 @@ def make_tile_estimate_from_source_tiling(
     tiling_split_core: int,
     tiling_full_load: int,
 ) -> TileEstimate:
+    """Convert source-like tiling parameters into a common TileEstimate.
+
+    Runtime KB entries and advanced-tiling replay both eventually produce
+    single-core M/N/K, depth, step, full-load and output-path choices. This
+    function turns those source-level parameters into the shared cost fields:
+    aligned FLOPs, tile counts, core efficiency, repeated GM traffic and the
+    compute/HBM lower bound for the current tiling.
+    """
+
     aic_num = int(config["aic_num"])
     elem_size = dtype_size(dtype)
     out_size = dtype_size(output_dtype)
@@ -713,6 +737,15 @@ def estimate_tile_from_advanced_tiling(
     config: dict[str, Any],
     kernel_type: str,
 ) -> TileEstimate:
+    """Approximate the ops-nn advanced MatMulV3 host tiling path.
+
+    This is used only for SoCs/configs where `kernel_model.advanced_tiling` is
+    enabled and no exact runtime KB entry is available. It mirrors source-level
+    strategy classes such as stream-K, ASW basic tiling, AL1/BL1 full-load and
+    fixpipe output, but it is still reported as a heuristic rather than exact
+    binary tiling data.
+    """
+
     stream_k = advanced_stream_k_kind(spec, dtype, config, kernel_type)
     if stream_k is not None:
         return advanced_stream_k_tile(spec, dtype, output_dtype, config, kernel_type, stream_k)
@@ -794,6 +827,13 @@ def estimate_tile(
     output_dtype: str,
     config: dict[str, Any],
 ) -> TileEstimate:
+    """Fallback analytic tiling search for unsupported or unknown kernels.
+
+    The search chooses a physically plausible tile that minimizes the modeled
+    current lower bound. It is deliberately marked `analytic_search` because it
+    is not evidence of the real kernel tiling chosen by CANN.
+    """
+
     aic_num = int(config["aic_num"])
     elem_size = dtype_size(dtype)
     out_size = dtype_size(output_dtype)
@@ -938,6 +978,8 @@ def estimate_tile_from_runtime_kb(
     config: dict[str, Any],
     entry: RuntimeKbEntry,
 ) -> TileEstimate:
+    """Build a TileEstimate from an exact ops-nn runtime knowledge-base entry."""
+
     aic_num = int(config["aic_num"])
     elem_size = dtype_size(dtype)
     out_size = dtype_size(output_dtype)
@@ -1090,6 +1132,14 @@ def select_tile_estimate(
     input_dtypes: list[str],
     kernel_type: str,
 ) -> TileEstimate:
+    """Choose the highest-confidence tiling source available for a matmul row.
+
+    Priority order is exact runtime KB, then advanced ops-nn tiling replay when
+    enabled for the target SoC, then analytic fallback. The returned
+    `TileEstimate.source` is part of the report contract and must be used when
+    interpreting confidence.
+    """
+
     use_ops_nn_v3_model = is_ops_nn_v3_kernel_type(kernel_type)
     key = runtime_kb_key_from_row(spec, input_dtypes, output_dtype) if use_ops_nn_v3_model else None
     if key is not None and not is_batch_matmul_kernel_type(kernel_type) and key in runtime_kb:
@@ -1110,6 +1160,14 @@ def ideal_kernel_bounds(
     output_dtype: str,
     config: dict[str, Any],
 ) -> tuple[float | None, float, float, int]:
+    """Return the ideal compute/HBM lower bound for comparison only.
+
+    This bound uses true logical FLOPs and minimum physical storage traffic. It
+    intentionally excludes real tiling replay, launch, sync, template,
+    occupancy and format costs, so it must not be interpreted as the current
+    kernel prediction.
+    """
+
     peak_tflops = peak_for_dtype(config, dtype)
     true_flops = 2 * spec.m * spec.n * spec.k * spec.batch
     compute_us = None
@@ -1136,5 +1194,3 @@ def dominant_bottleneck(launch_us: float, compute_us: float | None, hbm_us: floa
     if compute_us is not None:
         components["compute"] = compute_us
     return max(components.items(), key=lambda item: item[1])[0]
-
-

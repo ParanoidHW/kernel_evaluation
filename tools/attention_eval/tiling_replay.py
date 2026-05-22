@@ -9,6 +9,14 @@ from .common import AttentionSpec
 
 @dataclass(frozen=True)
 class AttentionTilingReplay:
+    """Attention tiling/source classification carried into report rows.
+
+    This is intentionally lighter than MatMul runtime KB replay. It records
+    which ops-transformer source path and high-level strategy class are visible
+    for a row, while keeping exact binary tiling unavailable until CANN host
+    tiling contexts can be replayed.
+    """
+
     actual_tiling_source: str
     fallback_tiling_source: str
     optimal_tiling_source: str

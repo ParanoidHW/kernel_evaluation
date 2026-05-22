@@ -12,6 +12,15 @@ from .tiling_replay import replay_attention_tiling_strategy
 
 @dataclass(frozen=True)
 class AttentionCostEstimate:
+    """Cost estimate for a single attention-family kernel.
+
+    Fields keep the ideal lower-bound components (`compute_us`, `vector_us`,
+    `hbm_us`) separate from current-kernel components
+    (`current_*`, occupancy, traffic, sync, latency and template terms). This
+    separation is important because generic attention math is often much lower
+    than the actual fused kernel path.
+    """
+
     spec: AttentionSpec
     dtype: str
     output_dtype: str
@@ -181,6 +190,15 @@ def _kernel_aware_components(
     ideal_vector_us: float,
     gm_bytes_min: int,
 ) -> dict[str, Any]:
+    """Add source-visible fused attention overheads above the ideal bound.
+
+    The base attention math accounts for QK/PV, softmax-like vector work and
+    minimum GM bytes. Real kernels also pay for tile occupancy, repeated traffic
+    from split-fuse paths, workspace/score metadata, inter-tile sync, and
+    template-specific latency floors. This helper centralizes those current
+    kernel terms while keeping the ideal bound available for diagnostics.
+    """
+
     # ops-transformer fused-infer attention uses Q_TILE_CEIL=128 and
     # MAX_KV_STACK_LEN=512 in the split-fuse path.
     q_block = 128
@@ -249,6 +267,16 @@ def estimate_attention_cost(
     kernel_type: str = "FusedInferAttentionScore",
     include_launch: bool = True,
 ) -> AttentionCostEstimate:
+    """Estimate the current cost of one attention-family kernel.
+
+    The function computes an ideal physical lower bound first, then layers on
+    kernel-aware costs derived from ops-transformer strategy classes and SoC
+    config knobs. `replay_attention_tiling_strategy` currently reports
+    source-visible strategy labels, not exact host tiling output, so reports
+    should treat source-strategy rows as medium confidence unless a specialized
+    path says otherwise.
+    """
+
     resolved_config = _resolve_config(config, config_path)
     dtype = (dtype or "UNKNOWN").strip().upper()
     output_dtype = (output_dtype or dtype).strip().upper()
