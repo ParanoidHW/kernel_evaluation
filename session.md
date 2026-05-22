@@ -66,6 +66,60 @@
   - DS3.2 remained about `0.176`.
 - Residual: DS3.2 INT8 GMM above-bound likely needs true `groupList`/`tuningConfigOptional` or exact quant adaptive sliding-window tiling replay.
 
+## 2026-05-22T07:29:49Z Complete Baseline Refresh
+
+- Regenerated a complete commit-scoped evaluation snapshot for HEAD `696f0c4`.
+- Snapshot directory: `eval_results/20260522T072949Z_696f0c4`.
+- `eval_results/LATEST` now points to this snapshot.
+- Summary files tracked by git:
+  - `eval_results/20260522T072949Z_696f0c4/eval_summary.csv`
+  - `eval_results/20260522T072949Z_696f0c4/metadata.txt`
+- Detailed resolved/unresolved CSVs were generated locally in the same snapshot directory, but remain ignored by `eval_results/.gitignore` to avoid committing bulky generated reports.
+- Evaluation reports covered 16 combinations:
+  - base 910B4/910C MatMul and Attention;
+  - base 910B4 GroupedMatmul;
+  - ds3.2 910C MatMul/Attention/GroupedMatmul;
+  - gemma 910B4 MatMul/Attention/GroupedMatmul;
+  - longcat 910B4 MatMul/Attention/GroupedMatmul;
+  - qwen3/qwen7b inferred 910B4 MatMul/Attention.
+
+Latest large/occupied precision summary:
+
+| Report | large max | p95 | median | lower-bound notes |
+|---|---:|---:|---:|---|
+| base 910B4 Attention | 0.259 | 0.208 | 0.089 | no violations |
+| base 910C Attention | 0.116 | 0.099 | 0.025 | no violations |
+| base 910B4 GroupedMatmul | 0.180 | 0.074 | 0.000 | ordinary ideal lower bound invalid for GMM; use routing-bound |
+| base 910B4 MatMul | 0.613 | 0.470 | 0.055 | 209 violations, mostly GMM/reference-bound related plus MatMulV2 tail |
+| base 910C MatMul | 0.542 | 0.240 | 0.055 | no violations |
+| ds3.2 910C Attention | 1.840 | 1.821 | 1.719 | 80 violations on KvQuantSparseFA |
+| ds3.2 910C GroupedMatmul | 0.176 | 0.165 | 0.090 | no ordinary lower-bound violations, but 120/120 above GMM bound |
+| ds3.2 910C MatMul | 0.689 | 0.651 | 0.166 | no violations |
+| gemma 910B4 Attention | 0.416 | 0.236 | 0.152 | no violations |
+| gemma 910B4 GroupedMatmul | 0.000 | 0.000 | 0.000 | within routing bounds; ordinary ideal lower bound not meaningful |
+| gemma 910B4 MatMul | 0.516 | 0.188 | 0.052 | 180 GMM/reference-bound violations |
+| longcat 910B4 Attention | n/a | n/a | n/a | no large occupied rows |
+| longcat 910B4 GroupedMatmul | 0.179 | 0.157 | 0.040 | 17 above-bound and 11 within-bound rows |
+| longcat 910B4 MatMul | 0.311 | 0.179 | 0.068 | 28 GMM/reference-bound violations |
+| qwen3/qwen7b Attention inferred 910B4 | 0.468 | 0.459 | 0.416 | no violations; FIA decode launch floor low |
+| qwen3/qwen7b MatMul inferred 910B4 | 0.811 | 0.584 | 0.390 | 483/483 violations |
+
+New findings from this refresh:
+
+- The previous GMM source-based routing-bound update is visible in current baseline: longcat/base GMM max is now around `18%`, gemma remains fully within bounds, and ds3.2 INT8 GMM remains around `17.6%` above bound.
+- `KvQuantSparseFlashAttention` is still the largest attention problem and cannot be treated as regular Flash/FusedInfer attention. It needs a dedicated model from `ops-transformer/attention/kv_quant_sparse_flash_attention`.
+- qwen3/qwen7b still maps to 910B4 by BlockNum principle, but MatMulV2 all-large rows violate the physical lower bound. This is not a tuning target; it indicates platform bandwidth, profiling unit, shape/storage interpretation, or kernel-path semantics are inconsistent.
+- Base/hyimage 910B4 MatMul now exposes a worse `MatMulV2` small-M tail than the older historical README summary because GMM is no longer dominating the same way after routing-bound separation.
+- Ordinary `ideal_lower_bound_us` is not a valid accuracy judge for GMM rows when group routing is unknown. GMM acceptance must use `gmm_routing_bound_error` and `gmm_position`.
+
+Recommended next modeling order:
+
+1. Build a dedicated `KvQuantSparseFlashAttention` evaluator from source-visible sparse/quant tiling and traffic behavior, then refresh ds3.2 attention baseline.
+2. Audit qwen3/qwen7b MatMulV2 physical lower-bound violation before modeling changes: verify units, shapes, storage formats, HBM config, and whether exported `Block Num` rows correspond to a different kernel path.
+3. Refine `MatMulV2` and `QuantBatchMatmulV3` small-M/long-K,N path from ops-nn source and tiling branches, especially decode-like M=1/2/4 cases.
+4. Continue GMM only when real `groupList`, `groupListType`, `tuningConfigOptional`, or source-derived quant/GMM scheduling evidence is available.
+5. Keep every feature change paired with a new commit-scoped `eval_results/<UTC>_<commit>/eval_summary.csv` refresh.
+
 ## Architecture Understanding
 
 - The repository is an Ascend profiling CSV kernel evaluator. Its target is interpretable kernel-aware estimation, not black-box fitting.
