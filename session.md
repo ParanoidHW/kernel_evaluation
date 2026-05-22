@@ -127,6 +127,15 @@
 - `tools/attention_eval/tiling_replay.py` 当前提供 source strategy replay，不声称获取二进制 tiling data。
 - `tools/matmul_eval/kernel_model.py` 当前区分 `runtime_kb_exact`、`advanced_tiling_heuristic` 和 `analytic_search`。
 
+## 2026-05-22 current gap 文档刷新
+
+本次刷新 `docs/current_eval_gap_zh.md`：
+
+- 将 gap 文档改为“两层基线”口径：全量基线使用 `eval_results/20260522T081103Z_0a7ccb1/eval_summary.csv`，qwen 最新增量使用 `eval_results/20260522T085206Z_55f097d/eval_summary.csv`。
+- 明确 `eval_results/LATEST` 当前指向 `20260522T085206Z_55f097d`，但该目录只覆盖 qwen3-7b/qwen7b 增量，不覆盖全部模型。
+- 删除旧结论中“qwen MatMul 全量 lower-bound violation”和“QSFA 严重 lower-bound violation”的当前问题表述，改为记录它们已经分别收敛到当前残留。
+- 当前 gap 优先级更新为：ds3.2 `QuantBatchMatmulV3` small-M/Weight-NZ/dequant，base `MatMulV2 M=1`，gemma/base FIA decode，GMM routing above-bound，QSFA exact replay residual。
+
 ## 后续要求
 
 - 后续除非用户另行说明，每完成一个新增特性/功能都需要本地提交
