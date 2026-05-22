@@ -75,6 +75,31 @@ Attention 报告中主要使用：
 
 当前 910B4 尾部是 `FusedInferAttentionScore` decode，规格为 `q_seq=1`、`kv_seq=288`、`head_dim=8192`。该项分类为 `unsupported_kernel_path`，不是未检查异常点：模型已经识别 incremental attention/source strategy 和源码可见 tile 常量，但还没有复现 custom-head-dim 模板的额外 vector/GM 行为。在加入更精确的 host tiling/template replay 前，将其作为残留。
 
+## QSFA 专用修正
+
+`KvQuantSparseFlashAttention` 不能套普通 FA/FIA 形状和流量模型。源码依据来自 `ops-transformer-master/attention/kv_quant_sparse_flash_attention`：
+
+- host tiling 支持 query `BSND/TND`，KV 支持 `BSND/TND/PA_BSND`。
+- PA 场景中 `s2Size = block_table.dim1 * block_size`，不能把 key cache 第一维 `block_num` 当 batch。
+- `gSize = n1Size / n2Size`，ds3.2 样本的 query/output 是 `[T,N,D]`，KV cache 是 `[block_num,N,block_size,D]`。
+- key/value dtype 支持 INT8/FP8/HIFLOAT8，query/output 是 FP16/BF16；profiling 的首个 compute dtype 不能用于给 K/V 计 BF16 字节。
+- host tiling 固定 V template，`sInnerSize` 默认 `512`，PA/A5 workspace 以 `S2_BASE_SIZE=128`、`D_SIZE=576` 和 `GetWorkspaceSize()` 中的 mm1/vec1/bmm2/vec2/topK 缓存公式为主。
+
+本轮修改：
+
+- 为 QSFA 增加专用 parser，按 PA cache 解释 `kv_seq`、`kv_heads`、`q_seq` 和 value dim。
+- QSFA 最小 HBM 字节按 Q/BF16 + K/V INT8 + output/BF16 计入。
+- QSFA current kernel 字节加入 source-visible V-template GM workspace，不进入 `ideal_lower_bound_us`。
+
+验证结果：
+
+```text
+ds3.2 QSFA before: max=1.840, p95=1.821, median=1.719, lower_bound_violations=80
+ds3.2 QSFA after:  max=0.200, p95=0.156, median=0.034, lower_bound_violations=0
+```
+
+剩余 tail 是 `duration_us=122.0`、`estimated_us=97.59` 的低估样本，约 `20.0%`。当前分类为 QSFA source-strategy replay residual，后续需要继续复现 exact tiling data、actual block table/sparse indices 和 A5/PA 的真实 workspace 访问次数。
+
 ## 验证命令
 
 ```bash

@@ -120,6 +120,38 @@ Recommended next modeling order:
 4. Continue GMM only when real `groupList`, `groupListType`, `tuningConfigOptional`, or source-derived quant/GMM scheduling evidence is available.
 5. Keep every feature change paired with a new commit-scoped `eval_results/<UTC>_<commit>/eval_summary.csv` refresh.
 
+## 2026-05-22T08:00:00Z QSFA Attention Model Fix
+
+- Continued TODO priority 1: dedicated `KvQuantSparseFlashAttention` model.
+- Source basis:
+  - `ops-transformer-master/attention/kv_quant_sparse_flash_attention/op_host/kv_quant_sparse_flash_attention_tiling.cpp`
+  - `ops-transformer-master/attention/kv_quant_sparse_flash_attention/op_host/kv_quant_sparse_flash_attention_tiling.h`
+  - `ops-transformer-master/attention/kv_quant_sparse_flash_attention/op_kernel/kv_quant_sparse_flash_attention_template_tiling_key.h`
+- Key source facts used:
+  - QSFA supports query `BSND/TND`, KV `BSND/TND/PA_BSND`.
+  - PA mode derives `s2Size = block_table.dim1 * block_size`; key cache first dimension is total block count, not batch.
+  - `gSize = n1Size / n2Size`.
+  - `QSFAMlaTiling::InitParams()` uses `V_TEMPLATE_MODE`; template key exposes V template mode and split-G flag.
+  - `CalcInnerSize()` uses default `sInnerSize=512`; A5/PA workspace formula exposes `S2_BASE_SIZE=128`, `D_SIZE=576`, preload buffers and topK cache bytes.
+  - Query/output dtype is FP16/BF16 while key/value dtype is INT8/FP8/HIFLOAT8; generic attention byte accounting overcharged K/V as BF16.
+- Code changes:
+  - `tools/attention_eval/common.py`: added QSFA-specific shape parser for ds3.2 PA-like cache layout `[block_num,N,block_size,D]` and query/output `[T,N,D]`.
+  - `tools/attention_eval/api.py`: added QSFA-specific input byte accounting and source-derived V-template workspace traffic for current-kernel estimate only.
+  - `docs/attention_eval_iteration_plan.md`: documented source facts, model semantics and validation result.
+- Validation commands:
+  - `python3 -m compileall tools`
+  - `python3 tools/eval_ops.py --op-kind attention --profiling example_profilings/profiling_with_model_code/ds3.2 --config configs/ascend_910c.json --output /tmp/ds32_attention_qsfa_eval.csv --unresolved-output /tmp/ds32_attention_qsfa_unresolved.csv`
+  - `python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/ds32_attention_qsfa_eval.csv`
+  - Regression generated for base 910B4/910C attention plus gemma/qwen7b attention.
+- Accuracy improvement:
+  - ds3.2 QSFA before: max `1.840`, p95 `1.821`, median `1.719`, lower-bound violations `80`.
+  - ds3.2 QSFA after: max `0.200`, p95 `0.156`, median `0.034`, lower-bound violations `0`.
+  - Generic base 910C attention remained max `0.116`, p95 `0.097`, median `0.026`.
+  - Generic base 910B4 attention remained max `0.295`, p95 `0.238`, median `0.097`.
+- Remaining QSFA residual:
+  - Top row line `519`: duration `122.0us`, estimate `97.59us`, relative error `20.0%`.
+  - Residual likely requires exact tiling data, actual block table/sparse indices, and real PA/A5 workspace access count. No arbitrary fit knob was added.
+
 ## Architecture Understanding
 
 - The repository is an Ascend profiling CSV kernel evaluator. Its target is interpretable kernel-aware estimation, not black-box fitting.

@@ -116,12 +116,16 @@ def infer_attention_spec(
 
     if len(input_shapes) < 3:
         return None
+    variant = _variant_from_type(kernel_type)
     q_shape, k_shape, v_shape = input_shapes[0], input_shapes[1], input_shapes[2]
     q_dims = _positive_dims(q_shape)
     k_dims = _positive_dims(k_shape)
     v_dims = _positive_dims(v_shape)
     if not q_dims or not k_dims or not v_dims:
         return None
+
+    if variant == "kv_quant_sparse_flash_attention":
+        return _infer_kv_quant_sparse_attention_spec(input_shapes, output_shapes, q_dims, k_dims, v_dims)
 
     head_dim = q_dims[-1]
     value_dim = v_dims[-1]
@@ -168,8 +172,95 @@ def infer_attention_spec(
         raw_aux_elements=raw_aux_elements,
         score_elements=score_elements,
         layout=f"{q_layout}|{k_layout}",
-        variant=_variant_from_type(kernel_type),
+        variant=variant,
         causal_or_masked=causal_or_masked,
+    )
+
+
+def _infer_kv_quant_sparse_attention_spec(
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    q_dims: list[int],
+    k_dims: list[int],
+    v_dims: list[int],
+) -> AttentionSpec | None:
+    """Infer QSFA MLA/PA shapes from source-visible layout conventions.
+
+    `KvQuantSparseFlashAttention` accepts query in TND/BSND and key/value in
+    BSND/TND/PA_BSND. The ds3.2 sample uses a PA-like key cache
+    `[block_num, N, block_size, D]` and query/output `[T, N, D]`; treating the
+    first key dimension as batch makes the generic parser count the whole cache
+    as 520 independent batches. The host tiling derives `s2Size` from
+    `block_table.dim1 * block_size` for PA and `gSize = n1 / n2`, so this
+    parser keeps query token/head axes separate from cache storage axes.
+    """
+
+    if len(q_dims) < 3 or len(output_shapes) == 0:
+        return None
+    out_dims = _positive_dims(output_shapes[0])
+    if len(out_dims) < 2:
+        return None
+
+    q_seq = q_dims[0]
+    q_heads = q_dims[-2]
+    head_dim = q_dims[-1]
+    value_dim = out_dims[-1]
+    output_elements = _shape_elements(output_shapes[0])
+
+    kv_heads = 1
+    block_size = 1
+    kv_seq = 1
+    layout = "t_n_d|pa_cache"
+    if len(k_dims) >= 4:
+        total_blocks = k_dims[0]
+        if k_dims[1] == q_heads:
+            kv_heads = k_dims[1]
+            block_size = k_dims[2]
+            layout = "t_n_d|pa_b_n_bs_d"
+        else:
+            block_size = k_dims[1]
+            kv_heads = k_dims[2]
+            layout = "t_n_d|pa_b_bs_n_d"
+        block_table_dims = _positive_dims(input_shapes[4]) if len(input_shapes) > 4 else []
+        max_blocks_per_batch = block_table_dims[1] if len(block_table_dims) >= 2 else total_blocks
+        kv_seq = max(1, max_blocks_per_batch * max(1, block_size))
+    else:
+        k_info = _choose_sequence_dim(k_dims, k_dims[-1])
+        if k_info is None:
+            return None
+        _, kv_heads, kv_seq, k_layout = k_info
+        layout = f"t_n_d|{k_layout}"
+
+    score_elements = max(1, q_seq * q_heads * kv_seq)
+    raw_aux_elements = sum(_shape_elements(shape) for shape in input_shapes[3:])
+    aux_elements = 0
+    for shape in input_shapes[3:]:
+        elements = _shape_elements(shape)
+        if elements <= 0:
+            continue
+        if len(_positive_dims(shape)) >= 2 and elements > score_elements:
+            aux_elements += score_elements
+        else:
+            aux_elements += elements
+
+    return AttentionSpec(
+        batch=1,
+        q_heads=max(1, q_heads),
+        kv_heads=max(1, kv_heads),
+        q_seq=max(1, q_seq),
+        kv_seq=max(1, kv_seq),
+        head_dim=max(1, head_dim),
+        value_dim=max(1, value_dim),
+        output_elements=output_elements,
+        q_elements=_shape_elements(q_dims),
+        k_elements=_shape_elements(k_dims),
+        v_elements=_shape_elements(v_dims),
+        aux_elements=aux_elements,
+        raw_aux_elements=raw_aux_elements,
+        score_elements=score_elements,
+        layout=layout,
+        variant="kv_quant_sparse_flash_attention",
+        causal_or_masked=aux_elements > 0,
     )
 
 

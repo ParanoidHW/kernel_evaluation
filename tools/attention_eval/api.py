@@ -114,6 +114,11 @@ def _attention_defaults(config: dict[str, Any]) -> dict[str, float]:
             "mask_traffic_factor": 0.35,
             "gqa_traffic_factor": 0.20,
             "workspace_score_factor": 0.35,
+            "kv_quant_sparse_s2_base_size": 128.0,
+            "kv_quant_sparse_traffic_factor": 1.0,
+            "kv_quant_sparse_workspace_score_factor": 0.0,
+            "kv_quant_sparse_latency_floor_us": 32.0,
+            "kv_quant_sparse_template_factor": 1.0,
             "min_occupancy_efficiency": 0.08,
             "vector_decode_multiplier": 5.0,
             "vector_prefill_multiplier": 2.5,
@@ -138,6 +143,11 @@ def _attention_defaults(config: dict[str, Any]) -> dict[str, float]:
         "mask_traffic_factor": 0.30,
         "gqa_traffic_factor": 0.15,
         "workspace_score_factor": 0.30,
+        "kv_quant_sparse_s2_base_size": 128.0,
+        "kv_quant_sparse_traffic_factor": 1.0,
+        "kv_quant_sparse_workspace_score_factor": 0.0,
+        "kv_quant_sparse_latency_floor_us": 32.0,
+        "kv_quant_sparse_template_factor": 1.0,
         "min_occupancy_efficiency": 0.10,
         "vector_decode_multiplier": 3.5,
         "vector_prefill_multiplier": 2.2,
@@ -160,7 +170,9 @@ def _attention_knob(config: dict[str, Any], key: str) -> float:
 def _template_factor(config: dict[str, Any], kernel_type: str, spec: AttentionSpec, is_decode: bool) -> float:
     model = config.get("attention_model", {})
     text = kernel_type.lower()
-    if is_decode:
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        key = "kv_quant_sparse_template_factor"
+    elif is_decode:
         key = "decode_template_factor"
     elif spec.q_seq <= 512 and spec.kv_seq <= 512 and "flashattentionscore" in text:
         key = "flash_short_prefill_template_factor"
@@ -203,6 +215,9 @@ def _kernel_aware_components(
     # MAX_KV_STACK_LEN=512 in the split-fuse path.
     q_block = 128
     kv_block = 512
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        q_block = 128
+        kv_block = int(_attention_knob(config, "kv_quant_sparse_s2_base_size"))
     q_tiles = _ceil_div(spec.q_seq, q_block)
     kv_tiles = _ceil_div(spec.kv_seq, kv_block)
     work_tiles = max(1, spec.batch * spec.q_heads * q_tiles * kv_tiles)
@@ -212,16 +227,23 @@ def _kernel_aware_components(
 
     is_decode = spec.q_seq <= 1
     template_factor = _template_factor(config, kernel_type, spec, is_decode)
-    traffic_factor = _attention_knob(config, "decode_traffic_factor" if is_decode else "prefill_traffic_factor")
-    if spec.causal_or_masked:
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        traffic_factor = _attention_knob(config, "kv_quant_sparse_traffic_factor")
+    else:
+        traffic_factor = _attention_knob(config, "decode_traffic_factor" if is_decode else "prefill_traffic_factor")
+    if spec.causal_or_masked and spec.variant != "kv_quant_sparse_flash_attention":
         traffic_factor += _attention_knob(config, "mask_traffic_factor")
-    if spec.kv_heads < spec.q_heads:
+    if spec.kv_heads < spec.q_heads and spec.variant != "kv_quant_sparse_flash_attention":
         traffic_factor += _attention_knob(config, "gqa_traffic_factor")
 
     # Online softmax and split-fuse paths keep score tiles in UB where possible,
     # but masks/LSE/split-KV combine paths can spill metadata/workspace traffic.
     score_workspace_factor = _attention_knob(config, "workspace_score_factor")
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        score_workspace_factor = _attention_knob(config, "kv_quant_sparse_workspace_score_factor")
     workspace_bytes = int(spec.score_elements * 4 * score_workspace_factor)
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        workspace_bytes += _kv_quant_sparse_workspace_bytes(spec, config, kv_block)
     current_gm_bytes = int(gm_bytes_min * traffic_factor + workspace_bytes)
     current_hbm_us = current_gm_bytes / max(float(config["hbm_bandwidth_tbps"]) * 1_000_000.0, 1e-9)
 
@@ -237,6 +259,8 @@ def _kernel_aware_components(
             latency_floor_us = _attention_knob(config, "fused_infer_decode_latency_floor_us")
         else:
             latency_floor_us = _attention_knob(config, "decode_latency_floor_us")
+    elif spec.variant == "kv_quant_sparse_flash_attention":
+        latency_floor_us = _attention_knob(config, "kv_quant_sparse_latency_floor_us")
     elif spec.q_seq <= 512 and spec.kv_seq <= 512:
         latency_floor_us = _attention_knob(config, "short_prefill_latency_floor_us")
     else:
@@ -255,6 +279,58 @@ def _kernel_aware_components(
         "latency_floor_us": latency_floor_us,
         "template_overhead_factor": template_factor,
     }
+
+
+def _attention_input_bytes(spec: AttentionSpec, dtype: str) -> int:
+    if spec.variant == "kv_quant_sparse_flash_attention":
+        # Source dtype support fixes query/output to FP16/BF16 and key/value to
+        # INT8/FP8-like storage. Profiling reports the first compute dtype as
+        # BF16, so generic dtype sizing would incorrectly charge K/V as BF16.
+        return spec.q_elements * dtype_size(dtype) + spec.k_elements + spec.v_elements
+    return (spec.q_elements + spec.k_elements + spec.v_elements) * dtype_size(dtype)
+
+
+def _align(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple if multiple > 0 else value
+
+
+def _kv_quant_sparse_workspace_bytes(spec: AttentionSpec, config: dict[str, Any], s2_base_size: int) -> int:
+    """Estimate QSFA V-template GM workspace from host tiling formulas.
+
+    `QSFAMlaTiling::GetWorkspaceSize()` allocates GM buffers for mm1 output,
+    vector1 output, bmm2 output, softmax sums, vec2 output, topK aggregation
+    cache and valid-mte2-size metadata. These are source-visible intermediate
+    buffers of the current kernel path, so they belong to current-kernel traffic
+    but not to the ideal lower bound.
+    """
+
+    act_core_num = max(1, int(config.get("aic_num", 1)))
+    preload_num = 2
+    byte_block = 32
+    m_base_size = 128
+    cube_m_size = min(max(1, spec.q_seq * max(1, spec.q_heads // max(1, spec.kv_heads))), m_base_size)
+    s_inner_size_align = _align(max(1, s2_base_size), byte_block)
+    head_dim_align = _align(spec.head_dim, byte_block)
+    cube_m_align = _align(cube_m_size, 16)
+    mm_res_ub_size = s_inner_size_align * cube_m_align
+    bmm2_res_ub_size = head_dim_align * cube_m_align
+
+    mm_res_bytes = preload_num * mm_res_ub_size * act_core_num * 4
+    vec1_res_bytes = preload_num * mm_res_ub_size * act_core_num * 2
+    bmm2_res_bytes = preload_num * bmm2_res_ub_size * act_core_num * 4
+    softmax_sum_bytes = preload_num * m_base_size * act_core_num * 4
+    vec2_res_bytes = preload_num * bmm2_res_ub_size * act_core_num * 4
+    topk_cache_bytes = 4 * 512 * (512 + 64) * 2 * act_core_num
+    mte2_size_bytes = 4 * 128 * 4 * (2 * act_core_num)
+    return int(
+        mm_res_bytes
+        + vec1_res_bytes
+        + bmm2_res_bytes
+        + softmax_sum_bytes
+        + vec2_res_bytes
+        + topk_cache_bytes
+        + mte2_size_bytes
+    )
 
 
 def estimate_attention_cost(
@@ -302,7 +378,7 @@ def estimate_attention_cost(
     vector_eff = float(resolved_config.get("attention_model", {}).get("vector_efficiency", 0.5))
     vector_us = vector_ops / max(vector_tops * 1_000_000.0 * vector_eff, 1e-9)
 
-    input_bytes = (spec.q_elements + spec.k_elements + spec.v_elements) * dtype_size(dtype)
+    input_bytes = _attention_input_bytes(spec, dtype)
     aux_bytes = spec.aux_elements * 4
     output_bytes = spec.output_elements * dtype_size(output_dtype)
     score_spill_factor = float(resolved_config.get("attention_model", {}).get("score_spill_factor", 0.0))
