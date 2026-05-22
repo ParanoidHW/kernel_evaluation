@@ -55,23 +55,26 @@ def evaluate_profiling(
             raise ValueError("evaluate_profiling requires either config or config_path")
         resolved_config = load_config(path)
     normalized_kind = op_kind.lower()
-    if normalized_kind not in {"matmul", "attention"}:
+    if normalized_kind not in {"matmul", "grouped_matmul", "attention"}:
         raise NotImplementedError(f"unsupported op_kind: {op_kind}")
 
-    if normalized_kind == "matmul":
+    if normalized_kind in {"matmul", "grouped_matmul"}:
         from matmul_eval.evaluator import evaluate_file
         from matmul_eval.runtime_kb import load_runtime_kb
 
         runtime_kb = load_runtime_kb(resolved_config)
-        report = ProfilingEvaluation(op_kind="matmul")
+        report = ProfilingEvaluation(op_kind=normalized_kind)
         for profiling_file in iter_input_files(profiling_inputs):
             rows, unresolved = evaluate_file(
                 profiling_file,
                 config=resolved_config,
                 runtime_kb=runtime_kb,
-                include_gmm=include_gmm,
+                include_gmm=True if normalized_kind == "grouped_matmul" else include_gmm,
                 include_allgather=include_allgather,
             )
+            if normalized_kind == "grouped_matmul":
+                rows = [row for row in rows if str(row.get("type", "")).lower() == "groupedmatmul"]
+                unresolved = [row for row in unresolved if str(row.get("type", "")).lower() == "groupedmatmul"]
             report.rows.extend(rows)
             report.unresolved.extend(unresolved)
         return report

@@ -17,6 +17,10 @@
 /attention_eval_report_*.csv
 /attention_eval_unresolved.csv
 /attention_eval_unresolved_*.csv
+/grouped_matmul_eval_report.csv
+/grouped_matmul_eval_report_*.csv
+/grouped_matmul_eval_unresolved.csv
+/grouped_matmul_eval_unresolved_*.csv
 /profiling_with_model_code_*_eval_*.csv
 /profiling_with_model_code_*_unresolved_*.csv
 

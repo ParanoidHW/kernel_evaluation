@@ -12,3 +12,13 @@
 - Key result: 910C attention large shape max relative error 0.116, p95 0.099; base 910C matmul large shape max 0.542, mostly MatMulV2 M=1 path; base 910B4 attention large shape max 0.259.
 - High-priority findings: GroupedMatmul has many lower-bound violations because group_list values/routing are absent; ds3.2 KvQuantSparseFlashAttention has max rel 1.840 and lower-bound violations; qwen7b MatMulV2 has lower-bound violation on all large-shape rows under current 910B4 assumptions.
 - Docs: wrote docs/current_eval_gap_zh.md and linked it from docs/architecture.md.
+
+2026-05-22T03:32:00Z gmm-independent-evaluation
+- Workflow skill: kernel-eval-workflow, continued from high-priority TODO "GroupedMatmul routing data missing".
+- Design: treat GroupedMatmul as an independent kernel family. Keep the theoretical ordinary MatMul lower bound only as a compatibility/reference field, and add two explicit routing scenarios because kernel_details.csv does not expose group_list.
+- Model: balanced scenario spreads tokens across min(expert_count, M) active experts; extreme_imbalance routes all tokens to one expert. Both scenarios charge active expert weight traffic, activation/output traffic, quant auxiliary bytes, Cube core work-tile occupancy, and dtype/quant compute peak where available.
+- Development: added tools/matmul_eval/gmm_model.py; added --op-kind grouped_matmul; propagated GMM fields through CSV writer; added large-shape GMM routing-bound summary.
+- Validation: py_compile passed for updated modules. grouped_matmul reports generated for base 910B4, longcat/gemma on 910B4, and ds3.2 on 910C.
+- Results: base 910B4 large/occupied GMM bound error max 0.543/p95 0.473/median 0.000; longcat max 0.542/p95 0.513/median 0.391; gemma max/p95/median 0.000; ds3.2 max 0.176/p95 0.165/median 0.090.
+- Review: this is not a fit. Above-bound rows are retained as low-confidence residuals needing real group_list or GMM-specific scheduling/sync/merge evidence.
+- Docs: updated docs/architecture.md, docs/matmul_eval_design_zh.md, docs/current_eval_gap_zh.md, and session.md.

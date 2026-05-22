@@ -9,6 +9,7 @@
 当前支持的算子族：
 
 - `matmul`：包含 shape/layout 解析、量化路径、runtime knowledge-base 命中、advanced tiling 近似、fallback analytic search 和校准建议。
+- `grouped_matmul`：独立过滤 `GroupedMatmul` 行，并报告专家 routing 的均衡与极端不均衡两种成本边界。
 - `attention`：包含 Q/K/V shape 解析、QK/PV FLOPs、softmax/vector 工作量、最小 HBM 流量，以及本地 `ops-transformer` 源码存在时的 source strategy replay。`estimated_us` 表示当前 kernel 估计，`ideal_lower_bound_us` 保留为物理下界参考。
 
 ## 分层
@@ -101,6 +102,8 @@ matmul_eval.kernel_model
   -> runtime_kb_exact / advanced_tiling_heuristic / analytic_search
 matmul_eval.quant_model
   -> 量化 matmul 的 compute、dequant、aux 和 GM 流量修正
+matmul_eval.gmm_model
+  -> GroupedMatmul 的专家均衡/极端不均衡 routing 边界
 matmul_eval.api
   -> 合并 tiling、compute、memory、launch、format 成 MatmulCostEstimate
 matmul_eval.evaluator

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import collections
 import statistics
 from pathlib import Path
 
@@ -35,6 +36,20 @@ def rel_error(row: dict[str, str]) -> float | None:
     if duration <= 0 or estimate <= 0:
         return None
     return abs(estimate - duration) / duration
+
+
+def gmm_bound_rel_error(row: dict[str, str]) -> float | None:
+    """Return zero inside GMM routing bounds, otherwise distance to nearest bound."""
+
+    duration = as_float(row, "duration_us")
+    low = as_float(row, "gmm_bounds_min_us")
+    high = as_float(row, "gmm_bounds_max_us")
+    if duration <= 0 or low <= 0 or high <= 0:
+        return None
+    if low <= duration <= high:
+        return 0.0
+    nearest = low if duration < low else high
+    return abs(nearest - duration) / duration
 
 
 def max_block_dim(row: dict[str, str]) -> int:
@@ -121,6 +136,16 @@ def summarize(path: Path, args: argparse.Namespace) -> None:
         print(
             f"  {op_type or '<unknown>'}: n={len(values)} "
             f"max={max(values):.4f} p95={percentile(values, 0.95):.4f} median={statistics.median(values):.4f}"
+        )
+    gmm_items = [(gmm_bound_rel_error(row), row) for _, row in large if row.get("gmm_model_kind")]
+    gmm_items = [(rel, row) for rel, row in gmm_items if rel is not None]
+    if gmm_items:
+        positions = collections.Counter(row.get("gmm_duration_position", "") for _, row in gmm_items)
+        gmm_rels = [rel for rel, _ in gmm_items]
+        print(
+            "gmm_routing_bound_error "
+            f"n={len(gmm_rels)} max={max(gmm_rels):.4f} p95={percentile(gmm_rels, 0.95):.4f} "
+            f"median={statistics.median(gmm_rels):.4f} positions={dict(sorted(positions.items()))}"
         )
     print("top_large_occupied_tail:")
     for rel, row in large[: args.top]:

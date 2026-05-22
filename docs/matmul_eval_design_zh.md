@@ -23,6 +23,24 @@
 
 因此 `GroupedMatmul` 当前仍是低置信度路径：如果报告出现 `ideal_lower_bound_us > duration_us`，优先检查是否把全部专家权重流量计入了单次执行，而真实 kernel 只访问了非空专家或命中了 L2/权重缓存。
 
+`GroupedMatmul` 也可以通过独立算子族入口评估：
+
+```bash
+python3 tools/eval_ops.py --op-kind grouped_matmul \
+  --profiling <profiling> \
+  --config <config.json> \
+  --output grouped_matmul_eval_report.csv \
+  --unresolved-output grouped_matmul_eval_unresolved.csv
+```
+
+独立报告保留普通 matmul 字段用于兼容，同时额外输出 routing 场景边界：
+
+- `gmm_balanced_*`：理想均衡场景，tokens 尽量均匀分布到可用专家，权重流量按活跃专家数计入。
+- `gmm_extreme_*`：极端负载不均衡场景，所有 tokens 落到单个专家，权重流量最小但并行度最低。
+- `gmm_duration_position`：实测时间位于两个边界内、低于边界或高于边界。
+
+这两个场景不是拟合值，而是缺少 `group_list` 实际值时的可解释上下界。若实测高于均衡边界，说明还存在模板调度、同步、atomic/merge、额外搬运或源码路径未建模；若实测低于极端边界，则优先检查 shape/流量解析。
+
 ## 建模原则
 
 工具不对历史样例做插值拟合，而是使用 kernel-aware 的半解析模型：
@@ -432,7 +450,7 @@ python3 tools/eval_ops.py \
 
 可选参数：
 
-- `--include-gmm`：纳入 `GroupedMatmul`。
+- `--include-gmm`：在普通 `matmul` 报告中纳入 `GroupedMatmul`，并附带 GMM routing 边界字段；独立分析推荐使用 `--op-kind grouped_matmul`。
 - `--include-allgather`：纳入 `AllGatherMatmul`。
 
 ## 已知限制
@@ -440,7 +458,7 @@ python3 tools/eval_ops.py \
 - 该模型不是 CANN tiling 的完整复刻，而是用确定性约束近似 kernel 行为；`runtime_kb_exact` 命中时才等价于读取源码生成的精确 tiling 知识。
 - 当前 profiling 中的 910C MatMulV3 shape 没有 runtime_kb 精确命中，因此使用 `advanced_tiling_heuristic`。
 - `BatchMatMulV3` advanced full-load/iter-batch/merge-batch 特殊路径仍是近似，后续如果有对应 profiling 样例应继续细化。
-- GMM 默认排除，当前没有按 grouped expert GEMM 建模。
+- GMM 默认不混入普通 MatMul 口径；当前提供独立 `grouped_matmul` 入口和低置信度 routing 边界模型，但没有真实 `group_list` 时不能声称精确复刻单次专家分布。
 - AllGatherMatmul 默认排除，当前不建模通信。
 - cache 大小和峰值 TFLOPS 当前是配置假设，拿到官方目标硬件数据后应更新配置。
 - 运行时 ND2NZ 检测目前使用 MatMulV3 风格条件，对 BatchMatMulV3 的 multi-batch 特殊路径还可以进一步细化。

@@ -12,6 +12,7 @@ from op_eval.profiling import is_excluded_by_default
 
 from .api import estimate_matmul_cost
 from .common import *
+from .gmm_model import estimate_grouped_matmul_bounds
 from .kernel_model import advanced_tiling_notes, ideal_kernel_bounds
 from .quant_model import infer_quant_spec
 
@@ -52,6 +53,10 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         tags.append("weight_only_quant")
     elif row.get("quant_compute_path") == "fake_quant_or_mixed":
         tags.append("fake_or_mixed_quant")
+    if row.get("gmm_model_kind"):
+        tags.append(str(row["gmm_model_kind"]))
+        if row.get("gmm_duration_position"):
+            tags.append(str(row["gmm_duration_position"]))
     if row["b_format"] == "FRACTAL_NZ":
         tags.append("weight_nz")
     elif row["a_format"] == "FRACTAL_NZ" or row["output_format"] == "FRACTAL_NZ":
@@ -87,6 +92,8 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         confidence = "low"
     elif "unknown_compute_peak" in tags:
         confidence = "medium"
+    if row.get("gmm_model_kind"):
+        confidence = "low"
     return "|".join(tags), confidence
 
 
@@ -138,6 +145,17 @@ def evaluate_file(
             input_dtypes = input_dtypes_from_row(row)
             kernel_type = row.get("Type", "")
             quant_spec = infer_quant_spec(row, spec, input_shapes)
+            gmm_bounds = None
+            if kernel_type.lower() == "groupedmatmul":
+                gmm_bounds = estimate_grouped_matmul_bounds(
+                    spec,
+                    input_shapes,
+                    input_dtypes,
+                    dtype,
+                    output_dtype,
+                    quant_spec,
+                    config,
+                )
             cost = estimate_matmul_cost(
                 spec,
                 dtype,
@@ -194,6 +212,27 @@ def evaluate_file(
             storage_padding_ratio = (
                 physical_storage_elements / logical_storage_elements if logical_storage_elements > 0 else 1.0
             )
+            gmm_fields: dict[str, Any] = {}
+            if gmm_bounds is not None:
+                gmm_fields = gmm_bounds.to_report_fields()
+                low = min(gmm_bounds.balanced.total_us, gmm_bounds.extreme.total_us)
+                high = max(gmm_bounds.balanced.total_us, gmm_bounds.extreme.total_us)
+                if duration_us <= 0:
+                    position = ""
+                elif duration_us < low:
+                    position = "below_gmm_bounds"
+                elif duration_us > high:
+                    position = "above_gmm_bounds"
+                else:
+                    position = "within_gmm_bounds"
+                gmm_fields.update(
+                    {
+                        "gmm_model_kind": "grouped_matmul_routing_bounds",
+                        "gmm_duration_position": position,
+                        "gmm_bounds_min_us": low,
+                        "gmm_bounds_max_us": high,
+                    }
+                )
 
             result: dict[str, Any] = {
                 "file": source_file,
@@ -319,6 +358,7 @@ def evaluate_file(
                 "residual_us": duration_us - estimated_us if duration_us > 0 else None,
                 "duration_over_estimate": duration_us / estimated_us if duration_us > 0 and estimated_us > 0 else None,
             }
+            result.update(gmm_fields)
             tags, confidence = classify(result)
             result["diagnosis"] = tags
             result["confidence"] = confidence
