@@ -9,6 +9,7 @@
 - 评估入口：`tools/eval_ops.py`
 - 架构说明：`docs/architecture.md`
 - MatMul 设计文档：`docs/matmul_eval_design_zh.md`
+- GroupedMatmul 设计文档：`docs/gmm_eval_design_zh.md`
 - Attention 设计文档：`docs/attention_kernel_eval_design.md`
 
 ## 目录说明

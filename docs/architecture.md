@@ -1,153 +1,363 @@
 # Kernel 评估工具架构
 
-本文是评估工具的架构入口。MatMul 详细建模说明见 `matmul_eval_design_zh.md`；Attention 设计说明见 `attention_kernel_eval_design.md`；当前 profiling 评估差距见 `current_eval_gap_zh.md`；硬件补充信息见 `info.md`。
+本文是仓库架构入口。算子族设计文档：
+
+- MatMul：`docs/matmul_eval_design_zh.md`
+- GroupedMatmul：`docs/gmm_eval_design_zh.md`
+- Attention：`docs/attention_kernel_eval_design.md`
+- 当前评估差距：`docs/current_eval_gap_zh.md`
+- 硬件信息补充：`docs/info.md`
 
 ## 目标
 
-该工具从导出的 profiling CSV 中估计算子 kernel 耗时。设计目标不是对历史样本做黑盒曲线拟合，而是用能对应到 kernel 实现和硬件机制的模型解释耗时。
+本仓库从昇腾 profiling CSV 中估计算子 kernel 耗时，并输出可解释的成本分量、tiling/source 来源、诊断标签和误差字段。设计目标不是对历史样本做黑盒拟合，而是基于以下信息建立 current-kernel 模型：
 
-当前支持的算子族：
+- profiling CSV 可见 shape、dtype、format、duration、Block Dim 和硬件 counter
+- `ops-nn` / `ops-transformer` 中的 kernel、host tiling、模板和调度逻辑
+- `configs/` 中的平台核数、HBM 带宽、cache/buffer、峰值吞吐和全局 current-kernel 参数
 
-- `matmul`：包含 shape/layout 解析、量化路径、runtime knowledge-base 命中、advanced tiling 近似、fallback analytic search 和校准建议。
-- `grouped_matmul`：独立过滤 `GroupedMatmul` 行，并报告专家 routing 的均衡与极端不均衡两种成本边界。
-- `attention`：包含 Q/K/V shape 解析、QK/PV FLOPs、softmax/vector 工作量、最小 HBM 流量，以及本地 `ops-transformer` 源码存在时的 source strategy replay。`estimated_us` 表示当前 kernel 估计，`ideal_lower_bound_us` 保留为物理下界参考。
+核心约束：
 
-## 分层
+- `estimated_us` 表示当前 kernel 路径估计。
+- `ideal_lower_bound_us` 表示物理下界参考。
+- fallback 估计不能伪装成 actual tiling。
+- 新增参数必须能解释为 kernel、tiling 或硬件机制，不允许 per-shape 拟合。
 
-实现分为共享算子层和算子族专用包：
+## 当前支持的算子族
 
-- `tools/eval_ops.py`：命令行入口。
-- `tools/op_eval/cli.py`：CLI 解析、配置加载、summary 分发和 CSV 输出。
-- `tools/op_eval/api.py`：库入口，包括 `estimate_op(...)` 和 `evaluate_profiling(...)`。
-- `tools/op_eval/common.py`：共享数值、dtype、shape、format 和配置辅助函数。
-- `tools/op_eval/profiling.py`：profiling CSV 发现和报告写入。
-- `tools/op_eval/types.py`：共享报告容器。
-- `tools/matmul_eval/`：MatMul 专用解析、成本 API、kernel/tiling 模型、量化模型、runtime knowledge-base 加载、报告和校准。
-- `tools/attention_eval/`：Attention 专用解析、成本 API、tiling/source replay、fallback analytic 模型和报告。
+### matmul
 
-## 数据流
+CLI：
+
+```bash
+python3 tools/eval_ops.py --op-kind matmul ...
+```
+
+覆盖普通 MatMul、BatchMatMul、TransposeBatchMatMul 和量化 MatMul。当前默认排除 `GroupedMatmul` 和 `AllGatherMatmul`，可通过 `--include-gmm` / `--include-allgather` 显式纳入兼容报告。
+
+主要能力：
+
+- ND / FRACTAL_NZ shape 与 storage 解析
+- `transA/transB` 候选推断
+- runtime KB exact tiling
+- advanced tiling heuristic
+- analytic fallback tiling
+- L2-aware GM 流量估计
+- ND2NZ 检测
+- INT8/INT4/FP8/MXFP8 等量化路径
+- small-M/N MatMulV2 current-kernel overhead
+- calibration suggestion
+
+### grouped_matmul
+
+CLI：
+
+```bash
+python3 tools/eval_ops.py --op-kind grouped_matmul ...
+```
+
+只保留 `Type=GroupedMatmul` 的行。它复用 MatMul evaluator 的通用读取和报告字段，但精度口径由 `tools/matmul_eval/gmm_model.py` 的 routing bounds 决定。
+
+主要能力：
+
+- 把 weight 的 `FRACTAL_NZ` 首维解释为专家数，而不是 batch
+- 输出 balanced routing 和 extreme imbalance 两个场景
+- 输出 `gmm_bounds_min_us/gmm_bounds_max_us`
+- 用 `gmm_duration_position` 判断实测是否落在可解释路由区间内
+
+GMM 缺少真实 `group_list` 时不能用普通 MatMul 单点 lower bound 判断精度。
+
+### attention
+
+CLI：
+
+```bash
+python3 tools/eval_ops.py --op-kind attention ...
+```
+
+覆盖 FA/FIA/PFA/IFA/Paged/QSFA 等 attention 类 `Type`。当前 replay 是 `ops-transformer` source strategy replay，不是 exact host tiling replay。
+
+主要能力：
+
+- Q/K/V shape 解析
+- decode/prefill、MQA/GQA、mask/aux、head_dim 策略标签
+- QK/PV FLOPs、softmax/vector、最小 HBM 下界
+- occupancy、traffic factor、workspace、sync、latency floor、template factor current-kernel 成本
+- QSFA PA cache 专用 parser 和 workspace 模型
+
+## 目录结构
+
+```text
+tools/eval_ops.py
+  -> CLI 入口
+
+tools/op_eval/
+  -> 通用配置、profiling 文件发现、CSV 输出、API 分发
+
+tools/matmul_eval/
+  -> MatMul / Quant MatMul / GMM 兼容评估
+
+tools/attention_eval/
+  -> Attention parser、source replay、成本模型和报告
+
+configs/
+  -> 平台配置和模型参数
+
+docs/
+  -> 架构、算子族设计、误差分析、硬件备注
+
+example_profilings/
+  -> 实测 profiling 样本
+
+eval_results/
+  -> 基线刷新汇总
+```
+
+## 共享数据流
 
 profiling 评估流程：
 
-1. `tools/eval_ops.py` 调用 `op_eval.cli.run_cli()`。
-2. `op_eval.cli` 加载硬件配置，并调用 `op_eval.api.evaluate_profiling(...)`。
-3. `op_eval.profiling.iter_input_files(...)` 将输入文件或目录展开为 CSV 文件。
-4. 选定算子族根据 profiling `Type` 过滤行。
-5. 算子族解析 shape、format、dtype、计数器和输出元数据。
-6. 算子族估算 compute、memory、launch、format 和 actual/fallback/optimal tiling 相关分量。
-7. 返回 resolved 与 unresolved 行，封装为 `ProfilingEvaluation`。
-8. CLI 打印算子族 summary，并按需写出 resolved/unresolved CSV 报告。
-
-整体数据流可概括为：
-
 ```text
-profiling CSV
-  -> op_eval 发现文件和分发行
-  -> <family>_eval 解析 Type/shape/format/dtype/counter
-  -> 逻辑 kernel spec
+tools/eval_ops.py
+  -> op_eval.cli.run_cli()
+  -> op_eval.api.evaluate_profiling(...)
+  -> op_eval.profiling.iter_input_files(...)
+  -> family evaluator 根据 Type 过滤行
+  -> 解析 shape / format / dtype / counter
+  -> 构造 logical spec
   -> tiling/source replay 或 fallback 模型
-  -> compute/vector/GM/launch/template 成本分量
-  -> resolved report + unresolved report
-  -> tail/error analyzer
+  -> compute / vector / HBM / launch / format / sync / template 成本
+  -> resolved rows + unresolved rows
+  -> CSV 输出和 summary
 ```
 
-其中 `kernel_details.csv` 是输入事实来源，但不是完整 kernel 上下文。它通常缺少 host tiling 中间结果、运行时 group_list 值、cache 命中状态和真实模板选择细节。因此评估器必须在报告中标明估计来源和置信度，不能把 fallback 推断伪装成真实 tiling。
+`evaluate_profiling(...)` 返回 `ProfilingEvaluation`：
 
-## 建模约定
+- `op_kind`
+- `rows`
+- `unresolved`
+- `resolved_count`
+- `unresolved_count`
+- `to_dict()`
 
-每个算子族都应显式区分三类概念：
+## API 与 CLI 注册
 
-- `actual_tiling`：来自 runtime knowledge-base、host tiling replay 或可直接解析 op_tiling 元数据的真实 kernel tiling 信息。
-- `fallback_tiling`：只有在真实 tiling 不可用时才使用的解析估计。
-- `optimal_tiling`：用于对比的理想/物理下界，不代表当前 kernel。
+共享入口在 `tools/op_eval/api.py`：
 
-MatMul 当前通过 `runtime_kb_exact`、`advanced_tiling_heuristic` 和 `analytic_search` 体现该拆分。Attention 在本地存在 `ops-transformer` 源码时输出 `actual_tiling_source=ops_transformer_source_strategy_replay`，否则退化为 `actual_tiling_source=unavailable_ops_transformer_replay` 和 `fallback_tiling_source=analytic_attention_bound`。
+- `estimate_op(op_type, *args, **kwargs)`
+- `evaluate_profiling(profiling, op_kind=..., config_path=...)`
 
-Attention 当前 kernel 估计使用 fused-infer split-fuse 路径中源码可见的常量，例如 `Q_TILE_CEIL=128` 和 `MAX_KV_STACK_LEN=512`，并结合 decode/prefill、mask/aux、MQA/GQA、FlashAttention/FusedInferAttention 等策略标签。在物理下界之上，模型额外加入 occupancy、traffic amplification、workspace score traffic、sync overhead、latency floor 和 template overhead factor。
+当前 `op_kind`：
 
-## 平台识别
+```text
+matmul
+grouped_matmul
+attention
+```
 
-对昇腾 profiling，平台识别需要区分 Cube 和 Vector 核数：
+CLI 参数在 `tools/op_eval/cli.py`：
 
-- Cube 类算子主要对齐 `aic_num`，例如 `MatMul`、`BatchMatMul`、`GroupedMatmul`、`QuantBatchMatmul` 和 Cube-heavy attention/FA 路径。
-- Vector 类算子主要对齐 `aiv_num`，例如 `Cast`、`Transpose`、`RotaryMul`、`Gather/Scatter`、activation、normalization、routing 和部分 fusion。
-- 910B4 的典型证据是 Cube 最大 block dim 约 `20`、Vector 最大 block dim 约 `40`。
-- 910C/A3 的典型证据是 Cube 最大 block dim 约 `24`、Vector 最大 block dim 约 `48`。
+- `--profiling`
+- `--config`
+- `--op-kind`
+- `--output`
+- `--unresolved-output`
+- `--suggest-calibration`
+- `--calibration-output`
+- `--include-gmm`
+- `--include-allgather`
 
-因此不要用全文件最大 `Block Dim` 直接推断 matmul/FA 的 Cube 核数；全局最大值经常来自 Vector 算子。
+`--suggest-calibration` 当前只支持 matmul。
 
-## Kernel 评估原理
+## actual / fallback / optimal 语义
 
-评估器不是“按历史样本回归 duration”，而是把耗时拆成可解释的 kernel 机制：
+所有算子族都必须区分三类语义：
 
-- `compute_us`：逻辑或对齐 FLOPs 除以目标 SoC 的 dtype 峰值，并考虑 pipeline/core efficiency。
-- `vector_us`：attention softmax、elementwise、reduction 等 AIV 工作量。
-- `hbm_us`：最小 GM/HBM 流量和 tiling 重读流量除以 HBM 带宽；MatMul 会考虑 L2 对重复流量的折减。
-- `launch_overhead_us`：kernel 启动和小 kernel 固定成本。
-- `format_overhead_us`：ND/NZ 等运行时格式转换成本。
-- `sync/template/latency`：attention split-fuse、decode/prefill、小序列和模板路径带来的额外成本。
+```text
+actual_tiling_source
+fallback_tiling_source
+optimal_tiling_source
+```
 
-`estimated_us` 表示当前 kernel 预测，包含当前模型认为 kernel 实际会承担的成本。`ideal_lower_bound_us` 只表示物理下界，通常不含真实模板开销、同步开销和小 kernel 固定延迟。若 `ideal_lower_bound_us > duration_us`，优先怀疑解析、流量过计或缺失运行时上下文，而不是继续增加经验系数。
+### MatMul
 
-## 算子族内部结构
+```text
+runtime_kb_exact            -> actual_tiling
+advanced_tiling_heuristic   -> actual_tiling，但不是二进制 replay
+analytic_search             -> fallback_tiling
+physical_lower_bound        -> optimal_tiling_source
+```
 
-MatMul 评估链路：
+### GMM
+
+GMM 没有 exact group routing，因为 profiling 缺少真实 `group_list`。当前主语义是 routing bounds：
+
+```text
+gmm_model_kind = grouped_matmul_routing_bounds
+gmm_duration_position = within/below/above_gmm_bounds
+```
+
+普通 MatMul 字段保留用于兼容，但 GMM 精度判断应使用区间误差。
+
+### Attention
+
+```text
+ops_transformer_source_strategy_replay -> source_strategy_replay
+unavailable_ops_transformer_replay     -> fallback_tiling
+physical_lower_bound                   -> optimal_tiling_source
+```
+
+Attention 当前没有 exact host tiling replay；source replay 只说明命中哪类源码策略和文件。
+
+## 成本分量
+
+共享概念：
+
+- `compute_us`：Cube FLOPs 成本
+- `vector_us`：AIV/vector 工作量，主要用于 Attention
+- `hbm_us`：GM/HBM 流量成本
+- `launch_overhead_us`：kernel 启动/调度固定开销
+- `format_overhead_us`：运行时格式转换，当前主要是 MatMul ND2NZ
+- `template_overhead_us`：MatMul 小 M/N current-kernel 模板/流水项
+- `template_overhead_factor`：Attention 模板成本倍率
+- `sync_overhead_us`：Attention split-fuse / KV tile 同步项
+- `latency_floor_us`：decode、小序列或 QSFA 等 current-kernel 时延地板
+
+字段语义：
+
+- `estimated_us`：当前 kernel 总估计。
+- `total_us`：与 `estimated_us` 保持一致。
+- `ideal_lower_bound_us`：物理下界。
+- `current_kernel_bound_us`：当前 tiling/current-kernel body 的理论下界。
+- `residual_us = duration_us - estimated_us`
+- `duration_over_estimate = duration_us / estimated_us`
+
+## MatMul 内部链路
 
 ```text
 matmul_eval.common
-  -> 从 shape/format 推断 MatmulSpec
+  -> infer_matmul_spec / infer_transpose_batch_matmul_spec / infer_grouped_matmul_spec
+
 matmul_eval.runtime_kb
-  -> 加载 ops-nn runtime knowledge-base
+  -> load_runtime_kb
+
 matmul_eval.kernel_model
-  -> runtime_kb_exact / advanced_tiling_heuristic / analytic_search
+  -> runtime_kb_exact
+  -> advanced_tiling_heuristic
+  -> analytic_search
+  -> ideal_kernel_bounds
+
 matmul_eval.quant_model
-  -> 量化 matmul 的 compute、dequant、aux 和 GM 流量修正
+  -> infer_quant_spec
+  -> infer_nd2nz_operands
+  -> estimate_quant_cost
+
 matmul_eval.gmm_model
-  -> GroupedMatmul 的专家均衡/极端不均衡 routing 边界
+  -> estimate_grouped_matmul_bounds
+
 matmul_eval.api
-  -> 合并 tiling、compute、memory、launch、format 成 MatmulCostEstimate
+  -> estimate_matmul_cost
+
 matmul_eval.evaluator
-  -> 逐行评估 profiling CSV 并生成报告
+  -> evaluate_file / print_summary / calibration_suggestions
 ```
 
-Attention 评估链路：
+## Attention 内部链路
 
 ```text
 attention_eval.common
-  -> 从 Q/K/V shape 推断 AttentionSpec
+  -> is_attention_row
+  -> infer_attention_spec
+  -> _infer_kv_quant_sparse_attention_spec
+
 attention_eval.tiling_replay
-  -> 基于 ops-transformer 源码存在性和 shape/type 输出策略标签
+  -> replay_attention_tiling_strategy
+
 attention_eval.api
-  -> 计算 QK/PV、softmax/vector、GM、occupancy、sync、latency/template 成本
+  -> estimate_attention_cost
+  -> _kernel_aware_components
+  -> _kv_quant_sparse_workspace_bytes
+
 attention_eval.evaluator
-  -> 逐行评估 profiling CSV 并生成报告
+  -> evaluate_file / classify / print_summary
 ```
 
-当前 attention replay 是 `source_strategy_replay`，不是二进制 tiling replay。它说明命中了哪类源码路径和策略标签，但不声称已拿到 CANN host tiling 的完整输出。
+## 平台配置
 
-## 配置
+当前配置文件：
 
-硬件和校准假设位于 `configs/`：
+- `configs/ascend_910b4.json`
+- `configs/ascend_910b4_1.json`
+- `configs/ascend_910c.json`
 
-- `configs/ascend_910b4.json`：910B4 AI Core 数、HBM 带宽、cache 假设、峰值吞吐、MatMul runtime knowledge-base 路径和校准项。
-- `configs/ascend_910b4_1.json`：qwen3-7b/qwen7b 专用 910B4-1 配置，保留 20 AIC/40 AIV 的 910B4 BlockNum 证据，但使用用户确认的 1.6 TB/s HBM。
-- `configs/ascend_910c.json`：910C 可见设备假设、峰值吞吐、advanced MatMul tiling 设置和校准项。
+平台识别原则：
 
-拿到更可靠的硬件或 CANN platform 数据后，应优先更新配置值，避免把 per-shape 拟合常量写入模型代码。
+- Cube 类算子主要参考 `aic_num`，例如 MatMul、BatchMatMul、GroupedMatmul、QuantBatchMatmul 和 Cube-heavy attention。
+- Vector 类算子主要参考 `aiv_num`，例如 Cast、Transpose、RotaryMul、Gather/Scatter、activation、normalization 和 routing。
+- 910B4 常见证据：Cube block dim 约 20，Vector block dim 约 40。
+- 910C/A3 常见证据：Cube block dim 约 24，Vector block dim 约 48。
+- 不要用全文件最大 `Block Dim` 判断 MatMul/Attention 平台。
 
-## 报告
+`Ascend910B4-1` 是 qwen3-7b/qwen7b 专用配置，使用 20 AIC、40 AIV、1.6 TB/s HBM。
 
-resolved CSV 行包含来源文件和行号、推断后的逻辑算子规格、profiling counter、估算分量、瓶颈分类、confidence、diagnosis 标签和实测/估计残差。
+## 报告与诊断
 
-unresolved CSV 行保留诊断 parser 缺口所需的元数据：文件、行号、算子 type/name、输入 shape、输出 shape，以及可用的 layout 字段。
+resolved CSV 行至少包含：
 
-## 扩展方式
+- 来源文件和行号
+- 原始 `Type/Name`
+- 推断后的逻辑规格
+- profiling counter
+- tiling/source/fallback 来源
+- 成本分量
+- 下界与 current-kernel 对比
+- `estimated_us`
+- `residual_us`
+- `diagnosis`
+- `confidence`
 
-新增算子族时：
+unresolved CSV 行保留：
 
-1. 在 `tools/<family>_eval/` 下新增包。
-2. 根据 profiling `Type` 做行检测，不依赖 scope 风格的 `Name`。
-3. 实现公开 estimate API 和 profiling-file evaluator。
-4. 报告行需要包含成本分量、来源标签、diagnosis 和 confidence。
-5. 在 `tools/op_eval/api.py` 和 `tools/op_eval/cli.py` 注册该算子族。
-6. 保持 actual tiling replay、fallback 估算和 optimal bound 语义分离。
+- `file`
+- `line`
+- `type`
+- `name`
+- `input_shapes`
+- `output_shapes`
+- MatMul 额外保留 input/output formats
+
+诊断标签由各算子族 evaluator 生成，不在共享层硬编码。
+
+## 基线与误差分析
+
+`eval_results/` 保存按时间和 commit 刷新的汇总结果：
+
+```text
+eval_results/<UTC>_<commit>/eval_summary.csv
+eval_results/<UTC>_<commit>/metadata.txt
+eval_results/LATEST
+```
+
+误差分析应优先看：
+
+- 最大相对误差
+- p95 相对误差
+- lower-bound violation
+- large/occupied rows
+- GMM routing bound error
+- diagnosis tail 分布
+
+小于 10us 的 kernel 经常受 launch/调度噪声主导，通常不作为建模主目标。
+
+## 扩展新算子族
+
+新增算子族时应遵循：
+
+1. 新建 `tools/<family>_eval/`。
+2. 用 `Type` 过滤 profiling 行，不依赖 `Name` scope。
+3. 定义 logical spec 和 parser。
+4. 明确源码路径、tiling/source replay 能力和 fallback 边界。
+5. 输出成本分量、source 标签、diagnosis 和 confidence。
+6. 在 `tools/op_eval/api.py` 和 `tools/op_eval/cli.py` 注册。
+7. 写入 `docs/<family>_eval_design_zh.md`。
+8. 刷新基线并更新 `session.md`。

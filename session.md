@@ -110,6 +110,23 @@
 - `docs/attention_eval_iteration_plan.md` 调整为 `docs/attention_kernel_eval_design.md`
 - `session.md` 与本地文档统一为中文
 
+## 2026-05-22 文档方案重构
+
+本次按当前实现重新组织 kernel 评估设计文档：
+
+- 重写 `docs/attention_kernel_eval_design.md`，明确当前 attention 是 `ops-transformer` source strategy replay，不是 exact host tiling replay；补充 parser、QSFA、current-kernel cost equation、报告字段和限制。
+- 重写 `docs/matmul_eval_design_zh.md`，聚焦普通 MatMul、BatchMatMul、TransposeBatchMatMul 和量化 MatMul；将 GMM 精度口径从 MatMul 文档中拆出。
+- 新增 `docs/gmm_eval_design_zh.md`，说明 `GroupedMatmul` 基于 routing bounds 评估，使用 balanced/extreme 两个场景，并以 `gmm_duration_position` 和区间误差作为主口径。
+- 重写 `docs/architecture.md`，按当前 CLI/API 注册、actual/fallback/optimal 语义、MatMul/GMM/Attention 内部链路、报告字段和基线流程更新。
+- 更新 `README.md`，补充 GMM 设计文档入口。
+
+当前文档与实现对应关系：
+
+- `tools/op_eval/api.py` 当前只注册 `matmul`、`grouped_matmul`、`attention`。
+- `tools/matmul_eval/gmm_model.py` 当前提供 GMM routing bounds，但没有 exact group_list replay。
+- `tools/attention_eval/tiling_replay.py` 当前提供 source strategy replay，不声称获取二进制 tiling data。
+- `tools/matmul_eval/kernel_model.py` 当前区分 `runtime_kb_exact`、`advanced_tiling_heuristic` 和 `analytic_search`。
+
 ## 后续要求
 
 - 后续除非用户另行说明，每完成一个新增特性/功能都需要本地提交
