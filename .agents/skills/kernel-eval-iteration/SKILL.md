@@ -28,6 +28,17 @@ relative_error = abs(estimated_us - duration_us) / max(duration_us, eps)
 7. 重新生成报告并比较最大相对误差、p95 和 top tail 是否改善。
 8. 把设计、开发、验证、残留问题写回 `docs/` 和 `session.md`。
 
+## 昇腾平台匹配检查
+
+对新增 profiling 网络做误差迭代前，先确认使用的硬件配置是否与 profiling 平台一致。该检查只适用于 Ascend/CANN 数据。
+
+- 优先读取目录 README、profiling 元数据和用户说明中的平台信息。
+- 若平台信息缺失或可疑，用 `Block Dim`/`Block Num` 做交叉验证：Cube 类算子匹配 `aic_num`，Vector 类算子匹配 `aiv_num`。
+- 910B4 的典型证据是 Cube 最大 block dim 约 `20`、Vector 最大 block dim 约 `40`。
+- 910C/A3 的典型证据是 Cube 最大 block dim 约 `24`、Vector 最大 block dim 约 `48`。
+- matmul/FA 评估必须优先使用 Cube 侧证据选择 SoC；Vector 侧只用于交叉验证，不得把 Vector 最大 block dim 当作 Cube 核数。
+- 如果发现此前报告使用了错误 SoC，应先重跑正确 SoC 的报告，再分析最大相对误差。
+
 ## 常用命令
 
 MatMul 示例：

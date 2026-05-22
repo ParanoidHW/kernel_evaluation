@@ -7,6 +7,7 @@ import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
+from op_eval.common import first_int
 from op_eval.profiling import is_excluded_by_default
 
 from .api import estimate_matmul_cost
@@ -111,7 +112,12 @@ def evaluate_file(
             output_shapes = parse_shapes(row.get("Output Shapes"))
             input_formats = parse_formats(row.get("Input Formats"))
             output_formats = parse_formats(row.get("Output Formats"))
-            spec = infer_matmul_spec(input_shapes, output_shapes, input_formats, output_formats)
+            if row.get("Type", "").lower() == "groupedmatmul":
+                spec = infer_grouped_matmul_spec(input_shapes, output_shapes, input_formats, output_formats)
+            else:
+                spec = infer_matmul_spec(input_shapes, output_shapes, input_formats, output_formats)
+            if spec is None and row.get("Type", "").lower() == "transposebatchmatmul":
+                spec = infer_transpose_batch_matmul_spec(input_shapes, output_shapes, input_formats, output_formats)
             if spec is None:
                 unresolved.append(
                     {
@@ -247,8 +253,8 @@ def evaluate_file(
                 "tiling_fix_opti": tile.tiling_fix_opti,
                 "tiling_special_opti": tile.tiling_special_opti,
                 "advanced_tiling_notes": advanced_tiling_notes(spec, dtype, config, kernel_type, tile),
-                "block_dim": parse_int(row.get("Block Dim")),
-                "mix_block_dim": parse_int(row.get("Mix Block Dim")),
+                "block_dim": first_int(row, "Block Dim", "Block Num"),
+                "mix_block_dim": first_int(row, "Mix Block Dim", "Mix Block Num"),
                 "aic_num": int(config["aic_num"]),
                 "duration_us": duration_us,
                 "aicore_time_us": parse_float(row.get("aicore_time(us)")),

@@ -37,3 +37,22 @@
 - Current validation: `attention_eval_report_910b4.csv` has max relative error `0.2946`, p95 `0.2380`, median `0.0965`; `attention_eval_report_910c.csv` has max relative error `0.1155`, p95 `0.0968`, median `0.0263`.
 - Current accepted residual: 910B4 `FusedInferAttentionScore` decode with `q_seq=1`, `kv_seq=288`, `head_dim=8192` remains under-estimated. This is not an uninspected outlier; it is classified as an unsupported custom-head-dim incremental-attention template path until exact host tiling/template replay is added.
 - Next refinement should replay exact host tiling data from the C++ op_host contexts where possible; current attention replay deliberately does not claim exact binary tiling data.
+
+## Profiling With Model Code Platform Check
+
+- For Ascend/CANN profiling, platform inference should distinguish Cube and Vector block dimensions.
+- Cube-like operators (`MatMul`, `BatchMatMul`, `GroupedMatmul`, `QuantBatchMatmul`, Cube-heavy FA paths) should be compared with `aic_num`.
+- Vector-like operators (`Cast`, `Transpose`, `RotaryMul`, `Gather/Scatter`, activation, routing, fusion) should be compared with `aiv_num`.
+- Current新增网络判断：
+  - `ds3.2`: Cube max block dim `24`, Vector max block dim `48`, use `910C/A3`.
+  - `gemma`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`.
+  - `qwen7b`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`; previous 910C inference from residual fitting is not reliable.
+  - `longcat`: Cube max block dim `20`, Vector max block dim `40`, use `910B4`.
+
+## Current MatMul/FA Tail Findings
+
+- Added GroupedMatmul-specific logical-shape parsing: the first dimension of `FRACTAL_NZ` weight is expert count, not a regular batch dimension. Logical FLOPs now use total routed tokens rather than `expert_count * tokens`.
+- GroupedMatmul remains low confidence when only `kernel_details.csv` is available: `group_list` values are not present, so the evaluator cannot know active experts or per-expert token distribution. Charging full expert weight traffic can make `ideal_lower_bound_us > duration_us`; this should be classified as missing runtime routing data rather than fixed with a fitted coefficient.
+- `ds3.2` matmul largest remaining tail is tiny `MatMul M=4,N=128,K=128`, where the analytic lower bound is below observed kernel latency by two orders of magnitude. This points to small-kernel launch/template/minimum-execution overhead; update only with source-visible template or launch evidence.
+- `ds3.2` FA tail is `KvQuantSparseFlashAttention` with `q_seq=128, kv_seq=1, head_dim=576`, currently over-estimated and marked as specialized low-confidence path. Need dedicated `kv_quant_sparse_flash_attention` source/tiling modeling rather than generic FA cost.
+- `gemma`, `qwen7b`, and `longcat` ordinary FA tails are mostly decode/short-prefill fixed overhead and are materially smaller than the specialized `KvQuantSparseFlashAttention` tail.

@@ -20,6 +20,7 @@ class AttentionTilingReplay:
 
 OP_SOURCE_FILES = {
     "flash_attention": "attention/flash_attention_score/op_host/flash_attention_score_tiling.cpp",
+    "kv_quant_sparse_flash_attention": "attention/kv_quant_sparse_flash_attention/op_host/kv_quant_sparse_flash_attention_tiling.cpp",
     "fused_infer_attention": "attention/fused_infer_attention_score/op_host/fused_infer_attention_score_tiling.cpp",
     "prompt_attention": "attention/prompt_flash_attention/op_host/prompt_flash_attention_tiling.cpp",
     "incremental_attention": "attention/incre_flash_attention/op_host/incre_flash_attention_tiling.cpp",
@@ -39,6 +40,8 @@ def _ops_transformer_root(config: dict[str, Any]) -> Path | None:
 
 def _variant_from_type_and_shape(kernel_type: str, spec: AttentionSpec) -> str:
     text = kernel_type.lower()
+    if "kvquant" in text or "kv_quant" in text:
+        return "kv_quant_sparse_flash_attention"
     if "paged" in text or "page" in text:
         return "paged_attention"
     if "incre" in text or spec.q_seq <= 1:
@@ -76,6 +79,8 @@ def replay_attention_tiling_strategy(
             source_file = path.as_posix()
 
     strategy_tags: list[str] = [variant]
+    if variant == "kv_quant_sparse_flash_attention":
+        strategy_tags.extend(["kv_quant", "sparse", "mla_absorb_specialized"])
     if spec.q_seq <= 1:
         strategy_tags.append("decode")
     else:
@@ -111,4 +116,3 @@ def replay_attention_tiling_strategy(
         ops_transformer_source_file=source_file,
         notes="ops_transformer_source_missing",
     )
-

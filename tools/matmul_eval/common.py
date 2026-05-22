@@ -273,6 +273,110 @@ def infer_standard_matmul(
     return candidates[0][1]
 
 
+def infer_transpose_batch_matmul_spec(
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    input_formats: list[str] | None = None,
+    output_formats: list[str] | None = None,
+) -> MatmulSpec | None:
+    if len(input_shapes) < 2:
+        return None
+    input_formats = input_formats or []
+    lhs_format = format_at(input_formats, 0)
+    rhs_format = format_at(input_formats, 1)
+    if lhs_format != "ND" or rhs_format != "ND":
+        return None
+    lhs, rhs = input_shapes[0], input_shapes[1]
+    if len(lhs) < 3 or len(rhs) < 3:
+        return None
+    if lhs[0] != rhs[0] or lhs[-1] != rhs[-2]:
+        return None
+    batch, m, k = lhs[0], lhs[-2], lhs[-1]
+    n = rhs[-1]
+    if output_shapes:
+        output_elems = num_elements(output_shapes[0])
+        if output_elems and output_elems != batch * m * n:
+            return None
+    return MatmulSpec(
+        m,
+        n,
+        k,
+        batch,
+        trans_a=False,
+        trans_b=False,
+        a_format=lhs_format,
+        b_format=rhs_format,
+        output_format=format_at(output_formats or [], 0),
+        a_storage_elements=num_elements(lhs),
+        b_storage_elements=num_elements(rhs),
+        output_storage_elements=num_elements(output_shapes[0]) if output_shapes else None,
+    )
+
+
+def infer_grouped_matmul_spec(
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    input_formats: list[str] | None = None,
+    output_formats: list[str] | None = None,
+) -> MatmulSpec | None:
+    """Infer logical work for GroupedMatmul.
+
+    CANN GroupedMatmul stores one weight matrix per expert, but each token is
+    routed to a subset of experts. The first NZ dimension is therefore expert
+    count, not a batch dimension to multiply into the logical GEMM work.
+    """
+
+    if len(input_shapes) < 2:
+        return None
+    input_formats = input_formats or []
+    output_formats = output_formats or []
+    lhs, rhs = input_shapes[0], input_shapes[1]
+    lhs_format = format_at(input_formats, 0)
+    rhs_format = format_at(input_formats, 1)
+    output_format = format_at(output_formats, 0)
+    if lhs_format != "ND" or rhs_format != "FRACTAL_NZ" or len(lhs) < 2 or len(rhs) < 4:
+        return None
+
+    lhs_dims = effective_matrix_dims(lhs, lhs_format)
+    rhs_dims = effective_matrix_dims(rhs, rhs_format)
+    if lhs_dims is None or rhs_dims is None:
+        return None
+    m, lhs_k = lhs_dims
+    rhs_k, rhs_n = rhs_dims
+    k_match = reconcile_k_dim(lhs_k, rhs_k, lhs_format, rhs_format)
+    if k_match is None:
+        return None
+    k, _ = k_match
+
+    n = rhs_n
+    if output_shapes:
+        out_dims = effective_matrix_dims(output_shapes[0], output_format)
+        if out_dims is None:
+            return None
+        out_m, out_n = out_dims
+        if out_m != m:
+            return None
+        n_match = output_dim_score(n, out_n, rhs_format)
+        if n_match is None:
+            return None
+        n, _ = n_match
+
+    return MatmulSpec(
+        m,
+        n,
+        k,
+        1,
+        trans_a=False,
+        trans_b=False,
+        a_format=lhs_format,
+        b_format=rhs_format,
+        output_format=output_format,
+        a_storage_elements=num_elements(lhs),
+        b_storage_elements=num_elements(rhs),
+        output_storage_elements=num_elements(output_shapes[0]) if output_shapes else None,
+    )
+
+
 def is_matmul_row(row: dict[str, str]) -> bool:
     text = row.get("Type", "").lower()
     return any(token in text for token in ("matmul", "mat_mul", "batchmatmul", "bmm"))

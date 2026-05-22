@@ -14,6 +14,15 @@
 
 `GroupedMatmul` 默认排除，因为专家分组权重不能直接等价成普通单 GEMM 或 batch GEMM。`AllGatherMatmul` 默认排除，因为通信开销可能主导实测时间。
 
+当显式使用 `--include-gmm` 纳入 `GroupedMatmul` 时，解析器按专家分组语义处理：
+
+- 第一输入 `x` 的 token 数作为总 `M`。
+- 第二输入 `weight` 的 `FRACTAL_NZ` 首维视为专家数，不作为普通 batch 乘入 FLOPs。
+- 逻辑 FLOPs 按实际 token 总量估算，而不是按“专家数 * token 数”估算。
+- 权重物理存储仍保留完整专家权重大小，但 profiling CSV 通常只有 `group_list` 的形状，没有每个专家实际 token 分布，因此无法精确判断本次 kernel 访问了多少专家权重切片。
+
+因此 `GroupedMatmul` 当前仍是低置信度路径：如果报告出现 `ideal_lower_bound_us > duration_us`，优先检查是否把全部专家权重流量计入了单次执行，而真实 kernel 只访问了非空专家或命中了 L2/权重缓存。
+
 ## 建模原则
 
 工具不对历史样例做插值拟合，而是使用 kernel-aware 的半解析模型：
@@ -32,6 +41,14 @@
 
 - `configs/ascend_910b4.json`：20 个 AI Core，0.8 TB/s HBM，无 HF32 BF16/FP16 峰值 240 TFLOPS。
 - `configs/ascend_910c.json`：从 910C profiling 的 Block Dim 推断 24 个 AI Core，1.6 TB/s HBM，无 HF32 BF16/FP16 峰值 400 TFLOPS。
+
+对新增昇腾 profiling，如果 README 或元数据没有明确平台，可用 `Block Dim`/`Block Num` 做初步交叉判断：
+
+- Cube 类算子看 `aic_num`，例如 `MatMul`、`BatchMatMul`、`GroupedMatmul`、`QuantBatchMatmul` 和主要走 Cube 的 attention/FA 子路径。
+- Vector 类算子看 `aiv_num`，例如 `Cast`、`Transpose`、`RotaryMul`、`Gather/Scatter`、activation、normalization、routing 和部分 fusion。
+- 910B4 的典型证据是 Cube 最大 block dim 约 `20`，Vector 最大 block dim 约 `40`。
+- 910C/A3 的典型证据是 Cube 最大 block dim 约 `24`，Vector 最大 block dim 约 `48`。
+- 不要用全文件最大 block dim 直接判断 matmul/FA 的 Cube 核数；全局最大值常由 Vector 算子贡献。
 
 当前已知或用户给定的信息：
 

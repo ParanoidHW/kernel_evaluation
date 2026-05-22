@@ -17,6 +17,8 @@
 /attention_eval_report_*.csv
 /attention_eval_unresolved.csv
 /attention_eval_unresolved_*.csv
+/profiling_with_model_code_*_eval_*.csv
+/profiling_with_model_code_*_unresolved_*.csv
 
 # Python caches.
 __pycache__/

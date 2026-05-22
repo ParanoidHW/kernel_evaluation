@@ -103,6 +103,14 @@ def parse_int(value: Any, default: int = 0) -> int:
     return int(parse_float(value, float(default)))
 
 
+def first_int(row: dict[str, Any], *keys: str, default: int = 0) -> int:
+    for key in keys:
+        value = row.get(key)
+        if value not in {"", None, "N/A"}:
+            return parse_int(value, default)
+    return default
+
+
 def parse_shapes(value: str | None) -> list[list[int]]:
     if not value or value == "N/A":
         return []

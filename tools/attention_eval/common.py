@@ -76,6 +76,8 @@ def _choose_sequence_dim(shape: list[int], head_dim: int) -> tuple[int, int, int
 
 def _variant_from_type(kernel_type: str) -> str:
     text = kernel_type.lower()
+    if "kvquant" in text or "kv_quant" in text:
+        return "kv_quant_sparse_flash_attention"
     if "paged" in text:
         return "paged_attention"
     if "incre" in text or "incremental" in text:

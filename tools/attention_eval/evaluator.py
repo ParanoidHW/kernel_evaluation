@@ -5,7 +5,7 @@ import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
-from op_eval.common import display_path, parse_float, parse_int, parse_shapes
+from op_eval.common import display_path, first_int, parse_float, parse_int, parse_shapes
 
 from .api import estimate_attention_cost
 from .common import infer_attention_spec, input_dtypes_from_row, is_attention_row, output_dtype_from_row
@@ -33,10 +33,15 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         tags.append("prefill_like")
     if row["kv_heads"] < row["q_heads"]:
         tags.append("mqa_gqa")
+    if row["variant"] == "kv_quant_sparse_flash_attention":
+        tags.append("specialized_kv_quant_sparse_path")
+        tags.append("generic_attention_cost_low_confidence")
     tags.append(row["kernel_bound_type"])
     if row["duration_us"] > 0 and row["estimated_us"] > 0 and row["duration_us"] / row["estimated_us"] > 5:
         tags.append("large_residual")
     confidence = "low" if row["actual_tiling_source"].startswith("unavailable") else "medium"
+    if row["variant"] == "kv_quant_sparse_flash_attention":
+        confidence = "low"
     return "|".join(tags), confidence
 
 
@@ -102,8 +107,8 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                 "raw_aux_elements": spec.raw_aux_elements,
                 "output_elements": spec.output_elements,
                 "score_elements": spec.score_elements,
-                "block_dim": parse_int(row.get("Block Dim")),
-                "mix_block_dim": parse_int(row.get("Mix Block Dim")),
+                "block_dim": first_int(row, "Block Dim", "Block Num"),
+                "mix_block_dim": first_int(row, "Mix Block Dim", "Mix Block Num"),
                 "aic_num": int(config["aic_num"]),
                 "duration_us": duration_us,
                 "aicore_time_us": parse_float(row.get("aicore_time(us)")),
