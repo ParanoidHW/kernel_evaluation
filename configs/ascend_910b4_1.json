@@ -1,0 +1,94 @@
+{
+  "soc": "Ascend910B4-1",
+  "description": "910B4-1 configuration for qwen3-7b/qwen7b model profiling. It keeps the 910B4 AI Core/Vector Core counts inferred from Block Num while using the user-confirmed 1.6 TB/s HBM bandwidth for this platform slice.",
+  "sources": {
+    "aic_num": "qwen3-7b/qwen7b profiling MatMulV2 Block Num observed mostly as 20, matching 910B4 cube-side block count",
+    "aiv_num": "qwen3-7b/qwen7b vector-like rows reach Block Num 40, matching 2x cube-side block count",
+    "hbm_bandwidth_tbps": "user confirmed qwen3-7b should use 910B4-1 with 1.6 TB/s bandwidth",
+    "cache_sizes": "carried from Ascend910B4 configuration until a dedicated 910B4-1 platform config is available",
+    "peak_tflops": "carried from Ascend910B4 configuration; this change only separates HBM bandwidth for qwen3-7b"
+  },
+  "aic_num": 20,
+  "aiv_num": 40,
+  "hbm_bandwidth_tbps": 1.6,
+  "l0a_bytes": 65536,
+  "l0b_bytes": 65536,
+  "l0c_bytes": 262144,
+  "l1_bytes": 524288,
+  "l2_bytes": 201326592,
+  "ub_bytes": 196608,
+  "bt_bytes": 4096,
+  "kernel_model": {
+    "runtime_kb": {
+      "enabled": true,
+      "matmul_v3_paths": [
+        "ops-nn-master-matmul-mat_mul_v3/matmul/mat_mul_v3/op_host/config/ascend910b/Ascend910B4_20_AiCore_MatMulV3_runtime_kb.json"
+      ]
+    },
+    "advanced_tiling": {
+      "enabled": false,
+      "arch": "non_advanced_ascend910b",
+      "applies_to": [
+        "MatMulV3",
+        "BatchMatMulV3"
+      ],
+      "notes": "910B4-1 keeps the same non-advanced host tiling path as 910B4; only platform bandwidth differs for the qwen3-7b profiling baseline."
+    }
+  },
+  "peak_tflops": {
+    "FLOAT16": 240.0,
+    "DT_BF16": 240.0,
+    "BFLOAT16": 240.0,
+    "FLOAT": 64.0,
+    "FLOAT32": 64.0,
+    "INT8": 600.0
+  },
+  "quant_matmul": {
+    "description": "Inherited QuantBatchMatmulV3 platform defaults from 910B4. qwen3-7b profiling currently exercises ordinary MatMulV2 and FIA paths.",
+    "peak_tops": {
+      "INT8": 600.0,
+      "INT4": 1200.0,
+      "MXFP8": 600.0
+    },
+    "pipeline_efficiency": {
+      "default": 0.60,
+      "INT8": 0.522674,
+      "INT4": 0.55,
+      "MXFP8": 0.60
+    },
+    "operation_factor": {
+      "full_quant": 1.0,
+      "full_quant_with_dequant": 1.0,
+      "weight_only_quant": 1.0,
+      "weight_only_quant_with_dequant": 1.0,
+      "fake_quant_or_mixed": 2.0
+    },
+    "dequant_us_per_output_element": 0.0,
+    "scale_replay_factor": 1.0
+  },
+  "calibration": {
+    "launch_overhead_us_by_type": {
+      "default": 0.0,
+      "BatchMatMul": 2.35824,
+      "MatMul": 3.6392,
+      "MatMulV2": 3.1942,
+      "MatMulV3": 0.0,
+      "BatchMatMulV2": 0.0,
+      "QuantBatchMatmulV3": 0.0
+    },
+    "pipeline_efficiency_by_dtype": {
+      "default": 1.0,
+      "FLOAT16": 0.976532,
+      "DT_BF16": 0.922814,
+      "BFLOAT16": 0.922814,
+      "FLOAT": 0.99724,
+      "FLOAT32": 0.99724
+    },
+    "format_overhead_us": {
+      "default": 0.0,
+      "ND2NZ": 0.0,
+      "FRACTAL_NZ": 0.0,
+      "NON_CONTIGUOUS": 0.0
+    }
+  }
+}
