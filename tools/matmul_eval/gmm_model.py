@@ -17,6 +17,7 @@ class GroupedMatmulScenarioEstimate:
     gm_bytes: int
     compute_us: float | None
     hbm_us: float
+    scheduler_us: float
     total_us: float
     core_efficiency: float
     work_tiles: int
@@ -27,7 +28,13 @@ class GroupedMatmulScenarioEstimate:
 
 @dataclass(frozen=True)
 class GroupedMatmulEstimate:
-    """Balanced and worst-skew routing bounds for a GroupedMatmul row."""
+    """Routing-aware estimates for a GroupedMatmul row.
+
+    ops-transformer exposes the GroupedMatmul host tiling and kernel scheduler,
+    but profiling CSVs do not carry groupList/tuningConfig. Therefore the model
+    reports explicit routing scenarios and a source-visible group scheduler
+    term, rather than inferring active experts from block_dim.
+    """
 
     expert_count: int
     weight_elements_per_expert: int
@@ -110,6 +117,11 @@ def _scenario_estimate(
             op_factor = 1.0
         compute_us = aligned_flops * op_factor / (float(peak) * 1_000_000.0 * max(core_eff, 1e-9) * max(efficiency, 1e-9))
 
+    # ops-transformer GMM kernels iterate over groupList in the kernel and
+    # skip empty groups after reading their split value. The profiling CSV does
+    # not expose groupList, so charge a small source-visible scheduling term
+    # when the configured expert count exceeds available Cube cores.
+    scheduler_us = max(0, expert_count - int(config["aic_num"])) * 0.04
     return GroupedMatmulScenarioEstimate(
         scenario=scenario,
         active_experts=active_experts,
@@ -117,7 +129,8 @@ def _scenario_estimate(
         gm_bytes=gm_bytes,
         compute_us=compute_us,
         hbm_us=hbm_us,
-        total_us=max(value for value in (compute_us, hbm_us) if value is not None),
+        scheduler_us=scheduler_us,
+        total_us=max(value for value in (compute_us, hbm_us) if value is not None) + scheduler_us,
         core_efficiency=core_eff,
         work_tiles=work_tiles,
     )

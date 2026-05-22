@@ -31,6 +31,10 @@ def percentile(values: list[float], pct: float) -> float:
 
 
 def rel_error(row: dict[str, str]) -> float | None:
+    if row.get("gmm_model_kind"):
+        gmm_rel = gmm_bound_rel_error(row)
+        if gmm_rel is not None:
+            return gmm_rel
     duration = as_float(row, "duration_us")
     estimate = as_float(row, "estimated_us")
     if duration <= 0 or estimate <= 0:
@@ -75,6 +79,9 @@ def compact_row(row: dict[str, str], rel: float) -> str:
         "duration_us",
         "estimated_us",
         "duration_over_estimate",
+        "gmm_bounds_min_us",
+        "gmm_bounds_max_us",
+        "gmm_duration_position",
         "ideal_lower_bound_us",
         "m",
         "n",

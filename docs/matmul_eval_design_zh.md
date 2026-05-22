@@ -41,6 +41,15 @@ python3 tools/eval_ops.py --op-kind grouped_matmul \
 
 这两个场景不是拟合值，而是缺少 `group_list` 实际值时的可解释上下界。若实测高于均衡边界，说明还存在模板调度、同步、atomic/merge、额外搬运或源码路径未建模；若实测低于极端边界，则优先检查 shape/流量解析。
 
+GMM 的实现依据来自 `ops-transformer/gmm/grouped_matmul`，不是 `ops-nn/matmul`。当前模型使用以下源码语义：
+
+- `op_host/op_tiling/grouped_matmul_tiling.cpp` 与 `arch35/grouped_*_matmul_tiling.cpp` 会解析 `groupType`、`groupListType`、`tuningConfigOptional`、`singleN` 和 `usedCoreNum`。
+- `op_kernel/grouped_matmul.h` 在 kernel 内逐 group 读取 `groupList`，对空 group 执行 skip，并用 `count % coreNum` 在 group 间轮转分配 Cube block。
+- quant 路径通常按 `aicNum` 设置 `BlockDim`；因此 `Block Dim` 只能说明启用的 Cube 核数，不能反推活跃专家数。
+- `kernel_details.csv` 当前没有导出真实 `groupList` 和 `tuningConfigOptional`，所以 GMM 的主判断口径是 `gmm_routing_bound_error`，不是普通 MatMul 的单点 `estimated_us`。
+
+因此 GMM 报告保留普通 `estimated_us` 作为兼容字段，但大 shape gap 分析会对 GMM 使用区间误差：实测落在 `gmm_bounds_min_us` 和 `gmm_bounds_max_us` 内记为 0，边界外计算到最近边界的相对距离。
+
 ## 建模原则
 
 工具不对历史样例做插值拟合，而是使用 kernel-aware 的半解析模型：

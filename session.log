@@ -22,3 +22,11 @@
 - Results: base 910B4 large/occupied GMM bound error max 0.543/p95 0.473/median 0.000; longcat max 0.542/p95 0.513/median 0.391; gemma max/p95/median 0.000; ds3.2 max 0.176/p95 0.165/median 0.090.
 - Review: this is not a fit. Above-bound rows are retained as low-confidence residuals needing real group_list or GMM-specific scheduling/sync/merge evidence.
 - Docs: updated docs/architecture.md, docs/matmul_eval_design_zh.md, docs/current_eval_gap_zh.md, and session.md.
+
+2026-05-22T04:20:00Z gmm-source-review-ops-transformer
+- Correction: GroupedMatmul implementation is in ops-transformer/gmm/grouped_matmul, not ops-nn/matmul.
+- Source review: host tiling parses groupType/groupListType/tuningConfigOptional/singleN/usedCoreNum; quant path can SetBlockDim(aicNum). Kernel grouped_matmul.h loops over groupList, skips empty groups, and schedules blocks across groups with count % coreNum.
+- Design update: do not infer active experts from Block Dim. Block Dim indicates launched Cube cores for GMM, not non-empty expert count.
+- Model update: keep balanced/extreme routing scenarios; add a source-visible group scheduler term for expert counts greater than Cube cores; use gmm_routing_bound_error as the large-shape error metric for GMM reports.
+- Validation: regenerated longcat/gemma/ds3.2 grouped_matmul reports. Longcat bound max improved from 0.542 to 0.179, Gemma remains 0.000, DS3.2 remains about 0.176.
+- Residual: DS3.2 INT8 GMM above-bound likely needs true groupList/tuningConfigOptional or exact quant adaptive sliding-window tiling replay.

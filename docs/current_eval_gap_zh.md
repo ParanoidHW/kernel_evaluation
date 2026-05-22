@@ -34,7 +34,7 @@
 
 ## GroupedMatmul 独立口径
 
-`GroupedMatmul` 缺少真实 `group_list`，因此独立报告不把普通 MatMul 的 `estimated_us` 当作最终判断，而是输出两种场景边界：
+`GroupedMatmul` 缺少真实 `groupList` 和 `tuningConfigOptional`，因此独立报告不把普通 MatMul 的 `estimated_us` 当作最终判断，而是输出两种场景边界。源码依据来自 `ops-transformer/gmm/grouped_matmul`：host tiling 设置 `groupListType/singleN/usedCoreNum`，kernel 内逐 group 读取 `groupList` 并用 `count % coreNum` 轮转调度，`Block Dim` 不能反推活跃专家数。
 
 - `gmm_balanced_*`：理想均衡，tokens 尽量分布到更多专家。
 - `gmm_extreme_*`：极端不均衡，所有 tokens 落到单个专家。
@@ -42,8 +42,8 @@
 
 | report | rows | large | bound max | bound p95 | bound median | positions |
 |---|---:|---:|---:|---:|---:|---|
-| grouped_matmul_910b4 | 208 | 187 | 0.543 | 0.473 | 0.000 | 159 within, 28 above |
-| longcat_grouped_matmul_910b4 | 28 | 28 | 0.542 | 0.513 | 0.391 | 28 above |
+| grouped_matmul_910b4 | 208 | 187 | 0.180 | 0.074 | 0.000 | 171 within, 16 above |
+| longcat_grouped_matmul_910b4 | 28 | 28 | 0.179 | 0.157 | 0.040 | 11 within, 17 above |
 | gemma_grouped_matmul_910b4 | 180 | 160 | 0.000 | 0.000 | 0.000 | 160 within |
 | ds32_grouped_matmul_910c | 120 | 120 | 0.176 | 0.165 | 0.090 | 120 above |
 
@@ -52,7 +52,7 @@
 - 910C attention 大 shape 结果最好：`FlashAttentionScore/FusedInferAttentionScore` 的大 shape max 约 `11.6%`，p95 约 `9.9%`，当前 source strategy replay 对长 prefill 已可作为相对可信基线。
 - 910C matmul 大 shape 总体可用，但 `MatMulV2` 的 `M=1` decode-like 路径仍有约 `54%` 最大误差；这不是 `<10us` 启动主导，而是小 M 但长 K/N 的 kernel 路径问题。
 - 910B4 普通 attention 大 shape/较充分使用样本 max 约 `25.9%`，主要是 `FusedInferAttentionScore` decode-like 路径。
-- `GroupedMatmul` 的普通 MatMul 兼容估计仍会产生巨大误差和下界违反，但独立 routing-bound 口径已把问题收敛到可解释范围：Gemma 大样本全部位于边界内，Longcat 高于均衡边界约 `54%`，DS3.2 高于边界约 `18%`。剩余差距需要真实 `group_list`、专家调度/同步、merge/atomic 或更具体 GMM kernel 源码路径解释，不能用经验系数拟合。
+- `GroupedMatmul` 的普通 MatMul 兼容估计仍会产生巨大误差和下界违反，但独立 routing-bound 口径已把问题收敛到可解释范围：Gemma 大样本全部位于边界内，Longcat 在加入源码可见的 groupList 调度项后 max 约 `17.9%`，DS3.2 高于边界约 `17.6%`。剩余差距需要真实 `groupList/tuningConfigOptional`、专家调度/同步、merge/atomic 或更具体 GMM kernel 分支解释，不能用经验系数拟合。
 - `ds3.2` 的 `KvQuantSparseFlashAttention` 是当前 attention 最大差距，max 约 `184%`，且有大量物理下界违反。该路径需要专门结合 `kv_quant_sparse_flash_attention` 源码和 tiling 处理，不能继续套普通 FA 模型。
 - `qwen7b MatMulV2` 在当前 910B4 配置下所有大 shape 样本都出现物理下界违反，说明硬件带宽/平台配置、shape 解析或物理存储假设至少有一项不匹配。该问题优先级高于普通拟合。
 - `longcat_attention` 没有进入大 shape/核打满集合，当前不作为 tiling 准确率核心样本。
@@ -62,4 +62,4 @@
 1. 检查 `qwen7b MatMulV2` 的平台和物理流量假设：它按 Cube/Vector block dim 匹配 910B4，但报告中 `ideal_lower_bound_us > duration_us` 全量出现，需要核对 HBM 带宽、profiling 单位、shape 存储解释和 MatMulV2 kernel 路径。
 2. 为 `KvQuantSparseFlashAttention` 建立专用模型：读取 `ops-transformer` 中 `kv_quant_sparse_flash_attention` 的 host tiling 和 kernel 分支，拆分 kv quant、sparse、MLA absorb、mask/aux、workspace 和实际访问流量。
 3. 对 910C/910B4 `MatMulV2 M=1` 长 K/N 路径做源码/tiling 检查，避免继续用普通 fallback tiling 解释 decode-like GEMV/GEMM 边界路径。
-4. 继续收敛 `GroupedMatmul` above-bound 样本：优先寻找真实 `group_list` 或 GMM 专用源码/tiling 信息；没有证据前保留为低置信度残留。
+4. 继续收敛 `GroupedMatmul` above-bound 样本：优先寻找真实 `groupList`、`groupListType` 和 `tuningConfigOptional`；没有这些运行时输入前，区间模型比单点估计更符合源码语义。
