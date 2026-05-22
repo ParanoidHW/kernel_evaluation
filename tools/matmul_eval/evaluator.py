@@ -67,6 +67,8 @@ def classify(row: dict[str, Any]) -> tuple[str, str]:
         tags.append("layout_padding")
     if row["m"] <= 4:
         tags.append("small_m_overhead")
+    if row.get("template_overhead_us", 0) and row["template_overhead_us"] > 0:
+        tags.append("small_m_matmul_v2_serial_pipeline")
     if row["mn_tile_count"] < row["aic_num"]:
         tags.append("low_tile_count")
     if row["cube_utilization_pct"] and row["cube_utilization_pct"] < 80:
@@ -337,6 +339,7 @@ def evaluate_file(
                 "quant_gm_bytes_min": quant_gm_bytes_min,
                 "quant_gm_bytes_tiled": quant_gm_bytes_tiled,
                 "launch_overhead_us": launch_us,
+                "template_overhead_us": cost.template_overhead_us,
                 "pipeline_efficiency": pipeline_eff,
                 "format_overhead_us": format_overhead,
                 "estimated_us": estimated_us,

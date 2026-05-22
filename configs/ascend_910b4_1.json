@@ -66,6 +66,21 @@
     "dequant_us_per_output_element": 0.0,
     "scale_replay_factor": 1.0
   },
+  "matmul_model": {
+    "small_m_matmul_v2": {
+      "enabled": true,
+      "applies_to": [
+        "MatMulV2"
+      ],
+      "max_m_or_n": 1,
+      "max_gm_bytes_for_l2_resident": 201326592,
+      "effective_aligned_tflops": 75.0,
+      "description": "Source-visible small-M/N MatMulV2 current-kernel term. The common MatMul path has a MatmulToMul policy for M=1 or N=1, while checked block MMAD paths disable GEMV and keep L1/L0 copy plus sync loops. For qwen3-7b 910B4-1 ND MatMulV2 rows whose working set fits L2, add a serial aligned-work pipeline term instead of changing the physical lower bound."
+    }
+  },
+  "attention_model": {
+    "fused_infer_decode_latency_floor_us": 21.5
+  },
   "calibration": {
     "launch_overhead_us_by_type": {
       "default": 0.0,

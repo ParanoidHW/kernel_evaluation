@@ -43,6 +43,7 @@ class MatmulCostEstimate:
     kernel_bound_type: str
     dominant_component: str
     launch_overhead_us: float
+    template_overhead_us: float
     format_overhead_us: float
     pipeline_efficiency: float
     kernel_lower_bound_us: float
@@ -115,6 +116,33 @@ def _total_bound_type(dominant_component: str, kernel_bound_type: str) -> str:
 def _default_quant_mode(input_dtypes: list[str]) -> str:
     data_bits = [dtype_bitwidth(dtype) for dtype in input_dtypes[:2] if is_quantized_data_dtype(dtype)]
     return f"int{min(data_bits)}" if data_bits else "unknown"
+
+
+def _small_m_matmul_v2_serial_us(
+    spec: MatmulSpec,
+    tile: TileEstimate,
+    config: dict[str, Any],
+    kernel_type: str,
+) -> float:
+    model = config.get("matmul_model", {}).get("small_m_matmul_v2", {})
+    if not model.get("enabled", False):
+        return 0.0
+    if kernel_type not in set(model.get("applies_to", ["MatMulV2"])):
+        return 0.0
+    max_edge = int(model.get("max_m_or_n", 1))
+    if min(spec.m, spec.n) > max_edge:
+        return 0.0
+    if spec.a_format != "ND" or spec.b_format != "ND" or spec.output_format != "ND":
+        return 0.0
+    if tile.source != "analytic_search":
+        return 0.0
+    max_l2_bytes = int(model.get("max_gm_bytes_for_l2_resident", config.get("l2_bytes", 0)))
+    if max_l2_bytes > 0 and tile.gm_bytes_min > max_l2_bytes:
+        return 0.0
+    effective_tflops = float(model.get("effective_aligned_tflops", 0.0))
+    if effective_tflops <= 0:
+        return 0.0
+    return tile.aligned_flops / (effective_tflops * 1_000_000.0)
 
 
 def estimate_matmul_cost(
@@ -198,7 +226,12 @@ def estimate_matmul_cost(
         gm_bytes_min = tile.gm_bytes_min
         gm_bytes_tiled = tile.gm_bytes_tiled
 
+    template_overhead_us = 0.0
+    if quant_spec is None or not quant_spec.is_quant:
+        template_overhead_us = _small_m_matmul_v2_serial_us(spec, tile, resolved_config, kernel_type)
+
     kernel_lower_bound_us = max(value for value in (flops_cost_us, memory_access_us) if value is not None)
+    kernel_lower_bound_us += template_overhead_us
     total_us = launch_us + kernel_lower_bound_us + format_overhead_us
     kernel_bound = _kernel_bound_type(flops_cost_us, memory_access_us)
     dominant_component = dominant_bottleneck(launch_us, flops_cost_us, memory_access_us, format_overhead_us)
@@ -218,6 +251,7 @@ def estimate_matmul_cost(
         kernel_bound_type=kernel_bound,
         dominant_component=dominant_component,
         launch_overhead_us=launch_us,
+        template_overhead_us=template_overhead_us,
         format_overhead_us=format_overhead_us,
         pipeline_efficiency=pipeline_efficiency,
         kernel_lower_bound_us=kernel_lower_bound_us,
