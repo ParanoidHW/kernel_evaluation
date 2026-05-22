@@ -1,5 +1,49 @@
 # Session Notes
 
+## 2026-05-22T08:52:06Z qwen Small Kernel Residual Fix
+
+- Fixed qwen3-7b/qwen7b residuals under `configs/ascend_910b4_1.json`.
+- Commit created for model/config change:
+  - `55f097d [feat] model qwen small kernel floors`
+- MatMul source/model basis:
+  - `ops-nn/matmul/common/cmct/policy/dispatch_policy.h` exposes `MatmulToMul`, described as the policy for converting matmul to vector when `M=1` or `N=1`.
+  - The checked block MMAD paths include `mmadParams.disableGemv = true`, so small-M/N public MatMulV2 rows can still pay L1/L0 copy, MMAD/fixpipe and synchronization pipeline costs rather than behaving like an ideal GM lower bound.
+  - `ops-nn/matmul/mv/op_host/op_api/aclnn_mv.cpp` also routes MV through `MatmulCommonProcess`, confirming that vector/matmul boundary cases share the common MatMul path.
+- Implemented `template_overhead_us` in MatMul current-kernel estimate:
+  - Only active when `configs/*::matmul_model.small_m_matmul_v2.enabled` is true.
+  - Conditions: `MatMulV2`, `M=1` or `N=1`, ND/ND/ND, `analytic_search` fallback tiling, and GM footprint within the configured L2-resident limit.
+  - Cost is aligned-work serial pipeline time from `tile.aligned_flops / effective_aligned_tflops`; it does not change `ideal_lower_bound_us`.
+  - qwen3-7b uses `effective_aligned_tflops=75.0` in `configs/ascend_910b4_1.json`, documented as a current-kernel aligned-work throughput for this small-M/N path, not a per-shape correction.
+- Attention config update:
+  - Added `attention_model.fused_infer_decode_latency_floor_us=21.5` for qwen3-7b 910B4-1.
+  - This applies to the source-strategy FIA decode path with `q_seq=1, kv_seq=6, head_dim=128`, where the kernel is launch/latency-floor dominated.
+- Validation commands:
+  - `python3 -m compileall tools`
+  - `python3 tools/eval_ops.py --op-kind matmul --profiling example_profilings/profiling_with_model_code/qwen7b --config configs/ascend_910b4_1.json --output /tmp/kernel_eval_qwen_910b4_1_fix/profiling_with_model_code_qwen7b_matmul_eval_910b4_1.csv --unresolved-output /tmp/kernel_eval_qwen_910b4_1_fix/profiling_with_model_code_qwen7b_matmul_unresolved_910b4_1.csv`
+  - `python3 tools/eval_ops.py --op-kind attention --profiling example_profilings/profiling_with_model_code/qwen7b --config configs/ascend_910b4_1.json --output /tmp/kernel_eval_qwen_910b4_1_fix/profiling_with_model_code_qwen7b_attention_eval_910b4_1.csv --unresolved-output /tmp/kernel_eval_qwen_910b4_1_fix/profiling_with_model_code_qwen7b_attention_unresolved_910b4_1.csv`
+  - `python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/qwen7b_matmul_eval_910b4_1_fix2.csv /tmp/qwen7b_attention_eval_910b4_1_fix2.csv`
+- Incremental eval snapshot:
+  - `eval_results/20260522T085206Z_55f097d/eval_summary.csv`
+  - `eval_results/20260522T085206Z_55f097d/metadata.txt`
+  - `eval_results/LATEST` now points to `20260522T085206Z_55f097d`.
+- qwen3-7b/qwen7b MatMulV2 after fix:
+  - rows/evaluated/large: 483/483/483.
+  - lower-bound violations: 0.
+  - large max relative error: `0.1495`, improved from `0.3575`.
+  - p95: `0.1290`, improved from `0.3426`.
+  - median: `0.0613`, improved from `0.2848`.
+  - top residual: line 3766, `MatMulV2 M=1,N=4096,K=4096`, duration `27.26us`, estimate `31.334us`, diagnosis `fallback_tiling|small_m_overhead|small_m_matmul_v2_serial_pipeline|memory_bound`.
+- qwen3-7b/qwen7b Attention after fix:
+  - rows/evaluated/large: 96/96/96.
+  - lower-bound violations: 0.
+  - large max relative error: `0.1097`, improved from `0.4681`.
+  - p95: `0.1001`, improved from `0.4586`.
+  - median: `0.0629`, improved from `0.4164`.
+  - top residual is now an over-estimate line at duration `22.98us` vs estimate `25.5us`, still classified as FIA decode launch-bound.
+- Remaining issues:
+  - MatMulV2 still uses fallback tiling rather than exact MatMulCommon host tiling replay. Current max error is under 15%, but exact replay would be needed before broadening the small-M/N model to other platforms.
+  - FIA decode source replay is strategy-level rather than exact tiling output. qwen-specific floor resolves this sample, but broader decode floors for gemma/910B4 should be handled separately.
+
 ## 2026-05-22T08:35:59Z qwen3-7b 910B4-1 Config And Baseline
 
 - User clarified that the qwen3-7b/qwen7b MatMulV2 lower-bound issue can be treated as a platform/configuration residual and that qwen3-7b should use a dedicated 910B4-1 config with 1.6 TB/s HBM bandwidth.

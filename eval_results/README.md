@@ -25,21 +25,21 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 
 ## 最新增量快照
 
-当前 `LATEST` 指向 `20260522T083559Z_83a39c6`，对应 commit `83a39c6`，只覆盖 qwen3-7b/qwen7b 在 `configs/ascend_910b4_1.json` 下的增量验证。该快照用于确认 910B4-1 的 1.6 TB/s HBM 平台口径，不替代下面的完整 16 报告基线。
+当前 `LATEST` 指向 `20260522T085206Z_55f097d`，对应 commit `55f097d`，只覆盖 qwen3-7b/qwen7b 在 `configs/ascend_910b4_1.json` 下的增量验证。该快照用于确认 910B4-1 的 1.6 TB/s HBM 平台口径和 small-kernel current-model 修复，不替代下面的完整 16 报告基线。
 
 过滤口径：`duration_us >= 10`，且 `block_dim/mix_block_dim >= 0.8 * aic_num` 或 `cube_utilization_pct >= 70`。
 
 | 报告 | rows | large | large max | p95 | median | LB violations | 主要 tail |
 |---|---:|---:|---:|---:|---:|---:|---|
-| `profiling_with_model_code_qwen7b_matmul_eval_910b4_1` | 483 | 483 | 0.357 | 0.343 | 0.285 | 0 | `MatMulV2 M=1,N=4096,K=11008` small-M memory-bound fallback tiling |
-| `profiling_with_model_code_qwen7b_attention_eval_910b4_1` | 96 | 96 | 0.468 | 0.459 | 0.416 | 0 | FIA decode launch floor 低估 |
+| `profiling_with_model_code_qwen7b_matmul_eval_910b4_1` | 483 | 483 | 0.149 | 0.129 | 0.061 | 0 | `MatMulV2 M=1` small-M serial pipeline residual |
+| `profiling_with_model_code_qwen7b_attention_eval_910b4_1` | 96 | 96 | 0.110 | 0.100 | 0.063 | 0 | FIA decode latency floor residual |
 
 增量结论：
 
 - qwen3-7b/qwen7b 仍按 BlockNum 原则映射到 910B4 类硬件：`MatMulV2` 主要 `Block Num=20`，Vector-like 行可到 `40`。
 - 用户确认该样本应使用 910B4-1，HBM 带宽为 1.6 TB/s。新增 `configs/ascend_910b4_1.json` 后，历史 `910b4_inferred` MatMulV2 的 483/483 lower-bound violation 降为 0。
-- MatMulV2 精度从历史 0.8 TB/s 口径的 max `0.811`、p95 `0.584`、median `0.390` 变为 max `0.357`、p95 `0.343`、median `0.285`。剩余 tail 是模型低估，需继续从 `M=1`/GEMV-like MatMulV2 kernel/tiling 路径完善，不能引入 per-shape 拟合。
-- Attention 结果不受 HBM 配置显著影响，仍是 `FusedInferAttentionScore` decode launch/latency floor 低估。
+- MatMulV2 在 910B4-1 带宽修正后为 max `0.357`、p95 `0.343`、median `0.285`；加入 source-visible small-M/N MatMulV2 serial pipeline 项后收敛为 max `0.149`、p95 `0.129`、median `0.061`。该项只影响 current-kernel estimate，不改变 `ideal_lower_bound_us`。
+- Attention 在 qwen decode 专用 `fused_infer_decode_latency_floor_us=21.5` 后从 max `0.468`、p95 `0.459`、median `0.416` 收敛为 max `0.110`、p95 `0.100`、median `0.063`。
 
 ## 最新完整基线
 

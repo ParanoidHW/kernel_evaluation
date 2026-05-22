@@ -205,7 +205,11 @@ gm_bytes_tiled_raw =
 
 hbm_us = gm_bytes_tiled / (hbm_bandwidth_tbps * 1e6)
 lower_bound_us = max(compute_us, hbm_us)
-estimated_us = launch_overhead_us + max(compute_us / pipeline_efficiency, hbm_us) + format_overhead_us
+estimated_us =
+  launch_overhead_us +
+  max(compute_us / pipeline_efficiency, hbm_us) +
+  template_overhead_us +
+  format_overhead_us
 ```
 
 `launch_overhead_us` 来自 `configs/ascend_910b4.json::calibration.launch_overhead_us_by_type`。当前默认值为 0.0，表示不把平台/运行时相关的固定开销硬编码进模型；对小规格或低 tile 数算子，应使用 `--suggest-calibration` 从低 tile 残差中得到初始估计，再写回配置。
@@ -217,6 +221,8 @@ physical_storage_elements / logical_storage_elements
 ```
 
 该字段用于标识 layout 或 padding 带来的物理存储膨胀。
+
+`template_overhead_us` 是 current-kernel 模板/流水项，不进入 `ideal_lower_bound_us`。当前仅 `configs/ascend_910b4_1.json::matmul_model.small_m_matmul_v2` 显式开启，用于 qwen3-7b/qwen7b 的 `MatMulV2`、ND layout、`M=1` 或 `N=1`、fallback tiling 且工作集可 L2 驻留的行。源码依据是公共 MatMul 路径存在 `MatmulToMul` 小 M/N policy，同时 checked block MMAD 路径中 `disableGemv=true`，实际执行仍有 L1/L0 copy、MMAD/fixpipe 和同步流水成本。该项按 aligned work 估计 current-kernel 额外流水时间，不改变物理最小读写流量。
 
 ## Tiling 近似
 
@@ -341,6 +347,7 @@ quant_compute_us =
 - `runtime_nd2nz`：检测到运行时 ND2NZ。
 - `layout_padding`：物理存储元素数比逻辑元素数高 5% 以上。
 - `small_m_overhead`：`M <= 4`。
+- `small_m_matmul_v2_serial_pipeline`：启用了 small-M/N MatMulV2 current-kernel 流水项。
 - `low_tile_count`：M/N/batch tile 数小于 AI Core 数。
 - `low_cube_utilization`：profiling 中 cube 利用率低于 80%。
 - `compute_bound`、`memory_bound`、`balanced_bound`：解析模型判断的主导瓶颈。
