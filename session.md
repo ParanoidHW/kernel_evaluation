@@ -152,6 +152,49 @@ Recommended next modeling order:
   - Top row line `519`: duration `122.0us`, estimate `97.59us`, relative error `20.0%`.
   - Residual likely requires exact tiling data, actual block table/sparse indices, and real PA/A5 workspace access count. No arbitrary fit knob was added.
 
+## 2026-05-22T08:11:03Z Post-QSFA Baseline Refresh
+
+- Regenerated complete commit-scoped snapshot for commit `0a7ccb1`.
+- Snapshot directory: `eval_results/20260522T081103Z_0a7ccb1`.
+- `eval_results/LATEST` now points to `20260522T081103Z_0a7ccb1`.
+- Summary files tracked:
+  - `eval_results/20260522T081103Z_0a7ccb1/eval_summary.csv`
+  - `eval_results/20260522T081103Z_0a7ccb1/metadata.txt`
+- Full report count remains 16.
+
+Post-QSFA large/occupied precision summary:
+
+| Report | large max | p95 | median | notes |
+|---|---:|---:|---:|---|
+| base 910B4 Attention | 0.259 | 0.208 | 0.089 | unchanged; FIA decode tail |
+| base 910C Attention | 0.116 | 0.099 | 0.025 | unchanged; long FA prefill tail |
+| ds3.2 910C Attention | 0.200 | 0.155 | 0.034 | QSFA fixed; no lower-bound violations |
+| ds3.2 910C MatMul | 0.689 | 0.657 | 0.318 | QuantBatchMatmulV3 small-M remains |
+| ds3.2 910C GroupedMatmul | 0.176 | 0.165 | 0.090 | 120/120 above GMM bound |
+| qwen3/qwen7b Attention inferred 910B4 | 0.468 | 0.459 | 0.416 | launch-bound decode floor remains low |
+| qwen3/qwen7b MatMul inferred 910B4 | 0.811 | 0.584 | 0.390 | 483/483 lower-bound violations remain |
+| base 910B4 MatMul | 0.613 | 0.476 | 0.075 | GMM rows are no longer mixed into MatMul report |
+| base 910C MatMul | 0.542 | 0.240 | 0.055 | MatMulV2 M=1 tail |
+| gemma 910B4 Attention | 0.416 | 0.236 | 0.152 | FIA decode custom head dim |
+| gemma 910B4 GroupedMatmul | 0.000 | 0.000 | 0.000 | within GMM bounds |
+| gemma 910B4 MatMul | 0.516 | 0.192 | 0.072 | GMM rows are no longer mixed into MatMul report |
+| longcat 910B4 GroupedMatmul | 0.179 | 0.157 | 0.040 | 17 above-bound, 11 within-bound |
+| longcat 910B4 MatMul | 0.311 | 0.179 | 0.080 | GMM rows are no longer mixed into MatMul report |
+
+New issues identified:
+
+- MatMul and model-level MatMul rows now exclude `GroupedMatmul` when `--op-kind matmul` is used; this is a semantic cleanup in report boundaries. Historical rows/large counts are not directly comparable unless GMM is added back explicitly.
+- QSFA residual is no longer a physical-bound issue. Remaining `20%` tail is a true current-kernel replay gap: exact block table/sparse indices, split-G/A5 path, and workspace reuse/access count are not available in profiling.
+- qwen3/qwen7b MatMulV2 remains the most suspicious platform/model consistency issue. It still maps to 910B4 by BlockNum evidence, but all large rows violate `ideal_lower_bound_us`.
+- ds3.2 QuantBatchMatmulV3 small-M and TransposeBatchMatMul still dominate ds3.2 MatMul p95.
+
+Recommended next actions:
+
+1. Audit qwen3/qwen7b MatMulV2 lower-bound violation before changing the model: verify units, shape interpretation, dtype/storage, HBM config and whether this profiling export uses a different MatMulV2 path.
+2. Build source-derived small-M MatMulV2/QuantBatchMatmulV3 path model from ops-nn tiling/kernel logic.
+3. Continue QSFA only if exact tiling or block table/sparse indices can be recovered; otherwise mark remaining `~20%` as source-strategy residual.
+4. Continue GMM only with real `groupList`/`tuningConfigOptional` or exact quant GMM tiling evidence.
+
 ## Architecture Understanding
 
 - The repository is an Ascend profiling CSV kernel evaluator. Its target is interpretable kernel-aware estimation, not black-box fitting.
