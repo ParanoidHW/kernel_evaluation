@@ -70,6 +70,7 @@ ELEMENTWISE_TYPES = {
     "zeroslike",
     "oneslike",
     "fill",
+    "range",
     "muls",
     "sigmoid",
     "broadcastto",
@@ -77,6 +78,7 @@ ELEMENTWISE_TYPES = {
     "clipbyvaluev2",
     "cos",
     "sin",
+    "rotarypositionembedding",
 }
 
 REDUCTION_TYPES = {"reducesum", "reducesumd", "reducemean", "reduceall", "softmaxv2"}
@@ -123,6 +125,7 @@ INDEX_SCATTER_TYPES = {
 }
 
 CV_TYPES = {
+    "conv2d",
     "conv3dv2",
     "resizebicubicv2",
     "resizebilinearv2",
@@ -196,12 +199,14 @@ ELEMENTWISE_SOURCE_PATHS = {
     "broadcastto": "ops-math/conversion/broadcast_to",
     "clipbyvaluev2": "ops-math/conversion/clip_by_value_v2",
     "fill": "ops-math/conversion/fill",
+    "range": "ops-math/math/range",
     "zeroslike": "ops-math/conversion/zeros_like",
     "oneslike": "ops-math/math/ones_like",
     "realdiv": "ops-math/math/real_div",
     "selectv2": "ops-math/math/select_v2",
     "cos": "ops-math/math/cos",
     "sin": "ops-math/math/sin",
+    "rotarypositionembedding": "ops-transformer-master/posembedding/rotary_position_embedding",
 }
 
 REDUCTION_SOURCE_PATHS = {
@@ -258,7 +263,8 @@ def classify_op_family(op_type: str) -> tuple[str, str, str]:
     if normalized in LAYOUT_MEMORY_TYPES:
         return "layout_memory", "ops-math", LAYOUT_SOURCE_PATHS.get(normalized, "ops-math/conversion")
     if normalized in ELEMENTWISE_TYPES:
-        return "elementwise_vector", "ops-math", ELEMENTWISE_SOURCE_PATHS.get(normalized, "ops-math/math")
+        repo = "ops-transformer-master" if normalized == "rotarypositionembedding" else "ops-math"
+        return "elementwise_vector", repo, ELEMENTWISE_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in REDUCTION_TYPES:
         repo = "ops-nn" if normalized == "softmaxv2" else "ops-math"
         return "reduction", repo, REDUCTION_SOURCE_PATHS.get(normalized, "ops-math/math")
@@ -410,6 +416,10 @@ def infer_source_strategy(
             return "elementwise_expensive_math_vector_pipeline"
         if normalized in {"zeroslike", "oneslike", "fill"}:
             return "elementwise_fill_vector_pipeline"
+        if normalized == "range":
+            return "range_output_generate"
+        if normalized == "rotarypositionembedding":
+            return "rotary_pos_embedding_vector_fusion"
         if input_elements and any(elems == 1 for elems in input_elements) and logical_elements > 1:
             return "elementwise_scalar_broadcast_vector_pipeline"
         if input_elements and any(elems not in {1, logical_elements} for elems in input_elements):

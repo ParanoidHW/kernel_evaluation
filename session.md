@@ -429,3 +429,32 @@
 - unresolved：`326`，较上一轮 `344` 减少 `18`
 - 主要 unresolved 缩减为 `RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`Range`。
 - index_scatter_routing 中位 `duration_over_estimate`：`10.83`，仍为低置信；主因是 profiling 缺 indices、mask selected count、routing/token 分布。
+
+## 2026-05-25 other_ops unresolved tail 分类
+
+本轮处理第五优先级 unresolved tail：
+
+- `RotaryPositionEmbedding` 纳入 elementwise/vector：
+  - source path：`ops-transformer-master/posembedding/rotary_position_embedding`
+  - source strategy：`rotary_pos_embedding_vector_fusion`
+  - 成本按输入 Q + cos/sin + 输出 HBM，vector op factor 表达 rotate/mul/add 融合逻辑。
+- `Range` 纳入 elementwise/vector：
+  - source path：`ops-math/math/range`
+  - source strategy：`range_output_generate`
+- `Conv2D` 纳入 `cv_regular`：
+  - 当前作为常规大 kernel/Cube-heavy CV 类 fallback，source 族对齐 `ops-nn/conv/conv2d_v2` 及 `ops-cv` 后续设计口径。
+  - 本轮只完成分类和低置信 fallback，不做 Conv exact tiling。
+- `MemSet` 已有 source path `ops-math/conversion/mem_set`，但当前 910C profiling 中 34 行 `Input/Output Shapes`、dtype、format 全为 `N/A`，无法推导 output bytes；保持 unresolved，作为需要 profiling 补 shape 的遗留。
+- `docs/architecture.md` 同步更新当前实现状态。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_unresolved_tail.csv --unresolved-output /tmp/other_ops_910c_unresolved_tail_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72364`，较上一轮 `72072` 增加 `292`
+- unresolved：`34`，较上一轮 `326` 减少 `292`
+- 唯一 unresolved type：`MemSet`，共 `34` 行，原因是 profiling 规格全为 `N/A`。
+- 新增 `cv_regular`：`32` 行 `Conv2D`，中位 `duration_over_estimate=10.21`，当前低置信，后续需要按 `ops-nn/conv2d_v2` host tiling/Cube 逻辑单独设计。

@@ -491,6 +491,7 @@ unresolved 至少保留原始 shape/dtype/format、缺失 attrs 和 source looku
 - elementwise/vector 已补充 `Cos`、`Sin`、`Equal`、`Greater`、`Tile` 等分类；`Cos/Sin/Pows/RealDiv` 等使用源码可解释的较高 vector op factor，`scalar/broadcast/fill` 路径通过 `source_strategy` 标记。
 - reduction/norm/activation source map 已细化到 `ops-math/math/reduce_*`、`ops-nn/activation/softmax_v2|gelu|swish`、`ops-nn/norm/rms_norm|layer_norm_v3|add_rms_norm|group_norm_silu` 等目录；报告区分 `reduce_tree`、`softmax_reduce_exp_sum_normalize`、`rmsnorm_reduce_scale`、`rmsnorm_residual_fusion`、`layernorm_mean_var_scale`、`activation_vector_pipeline` 等策略。
 - index/scatter/routing 已补充 `GatherElements`、`ScatterElementsV2`、`MaskedSelectV3`、`LinearIndex`、`NonZero` 分类和源码路径；报告区分 `gather_random_read_missing_indices`、`scatter_random_write_missing_indices`、`mask_compaction_missing_selected_count`、`linear_index_missing_indices`、`moe_routing_missing_token_distribution` 等低置信策略。
+- unresolved tail 已补充 `RotaryPositionEmbedding`、`Range`、`Conv2D` 分类：Rope 对齐 `ops-transformer-master/posembedding/rotary_position_embedding`，Range 对齐 `ops-math/math/range`，Conv2D 对齐常规 CV/Cube kernel 族。profiling 中 `MemSet` 行 shape/dtype/format 为 `N/A`，当前保持 unresolved。
 - `tools/other_ops_eval/api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
 - `tools/other_ops_eval/evaluator.py`：profiling CSV 读取、resolved/unresolved 报告、summary 输出。
 - `tools/op_eval/api.py` / `tools/op_eval/cli.py`：注册 `op_kind=other_ops`。

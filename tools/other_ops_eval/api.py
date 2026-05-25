@@ -59,6 +59,10 @@ def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
     normalized = spec.op_type.replace("_", "").replace("-", "").lower()
     if normalized in {"zeroslike", "oneslike", "fill"}:
         return 0.5
+    if normalized == "range":
+        return 1.0
+    if normalized == "rotarypositionembedding":
+        return 6.0
     if normalized in {"cos", "sin"}:
         return cfg["transcendental_op_factor"]
     if normalized in {"sigmoid"}:
