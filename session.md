@@ -458,3 +458,61 @@
 - unresolved：`34`，较上一轮 `326` 减少 `292`
 - 唯一 unresolved type：`MemSet`，共 `34` 行，原因是 profiling 规格全为 `N/A`。
 - 新增 `cv_regular`：`32` 行 `Conv2D`，中位 `duration_over_estimate=10.21`，当前低置信，后续需要按 `ops-nn/conv2d_v2` host tiling/Cube 逻辑单独设计。
+
+## 2026-05-25 other_ops 当前基线汇总和新问题
+
+本轮完成优先级内的其他算子分类和首轮建模后，刷新了 910C 子集与全量探索基线。
+
+910C 子集命令：
+
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_unresolved_tail.csv --unresolved-output /tmp/other_ops_910c_unresolved_tail_unresolved.csv`
+- `python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/other_ops_910c_unresolved_tail.csv`
+
+910C 子集结果：
+
+- resolved：`72364`
+- unresolved：`34`
+- unresolved 仅剩 `MemSet`，且 profiling shape/dtype/format 全为 `N/A`。
+- relative error：
+  - max：`5.7103`
+  - p95：`0.5539`
+  - p90：`0.3889`
+  - median：`0.2987`
+- `duration_over_estimate` median：`0.7700`
+- family 中位 `duration_over_estimate`：
+  - elementwise_vector：`0.77`
+  - layout_memory：`2.48`
+  - norm_activation：`1.10`
+  - index_scatter_routing：`10.83`
+  - reduction：`4.92`
+  - cv_regular：`10.21`
+
+910C top tail：
+
+- `Pack`：缺 axis，当前按 output storage 做 conservative HBM 估计，出现 overestimate。
+- `GatherV2/GatherV3`：缺 indices 实际访问范围，按随机访问 fallback 导致 overestimate。
+- `Slice`：缺 begin/size/stride，无法判断是否只是连续小片段，当前保守估计。
+
+全量探索命令：
+
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings --config configs/ascend_910c.json --output /tmp/other_ops_all_910c_config.csv --unresolved-output /tmp/other_ops_all_910c_config_unresolved.csv`
+- `python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/other_ops_all_910c_config.csv`
+
+全量探索结果：
+
+- resolved：`91971`
+- unresolved：`2678`
+- relative error：
+  - max：`333.4668`
+  - p95：`0.7867`
+  - p90：`0.6534`
+  - median：`0.3158`
+- 该全量结果混合 910B4、910C、longcat 等不同平台，却统一使用 `ascend_910c.json`，只能作为 Type 覆盖和 tail 发现，不作为严格精度基线。
+- 全量主要 unresolved：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MoeComputeExpertTokens`、`MemSet`、`MlaPrologV3`、`LightningIndexerQuant`、`PadV3`、`Sort`、`InterleaveRope`、`KvRmsNormRopeCache`。
+
+新问题和建议措施：
+
+- `MemSet N/A`：profiling 缺 shape/dtype/format，当前无法估计 output bytes。需要 profiling 导出补齐规格，或从相邻 `TransData/Conv` fusion 上下文解析 memset buffer 大小。
+- `Pack/Slice/Gather` overestimate：都属于缺 axis/offset/indices 的低置信路径。后续需要 profiling attrs、host tiling data 或运行时输入摘要；不应通过降低 HBM 带宽或随机访问因子拟合。
+- `Conv2D`：已分类为 `cv_regular`，但当前只是 fallback。后续应按 `ops-nn/conv/conv2d_v2` tiling、Cube FLOPs、NC1HWC0/FRACTAL_Z storage、L0/L1/BT 和 bias/scale/fixpipe 路径单独建模。
+- 全量 unresolved 的 `AutomaticBufferFusionOp/DynamicQuant/Rsqrt/RotaryMul/InterleaveRope/KvRmsNormRopeCache/MlaPrologV3` 需要新一轮按 transformer/vector fusion 类设计，不应混入本轮 basic other_ops fallback。
