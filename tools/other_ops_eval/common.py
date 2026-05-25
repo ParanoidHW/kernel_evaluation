@@ -199,6 +199,29 @@ ELEMENTWISE_SOURCE_PATHS = {
     "sin": "ops-math/math/sin",
 }
 
+REDUCTION_SOURCE_PATHS = {
+    "reducesum": "ops-math/math/reduce_sum",
+    "reducesumd": "ops-math/math/reduce_sum",
+    "reducemean": "ops-math/math/reduce_mean",
+    "reduceall": "ops-math/math/reduce_all",
+    "softmaxv2": "ops-nn/activation/softmax_v2",
+}
+
+NORM_ACTIVATION_SOURCE_PATHS = {
+    "rmsnorm": "ops-nn/norm/rms_norm",
+    "layernormv3": "ops-nn/norm/layer_norm_v3",
+    "add_rmsnorm": "ops-nn/norm/add_rms_norm",
+    "addrmsnorm": "ops-nn/norm/add_rms_norm",
+    "inplaceaddrmsnorm": "ops-nn/norm/inplace_add_rms_norm",
+    "addrmsnormcast": "ops-nn/norm/add_rms_norm_cast",
+    "swish": "ops-nn/activation/swish",
+    "gelu": "ops-nn/activation/gelu",
+    "swiglu": "ops-nn/activation/swiglu",
+    "gegluv2": "ops-nn/activation/geglu_v2",
+    "dequantswigluquant": "ops-nn/activation/swiglu",
+    "groupnormsilu": "ops-nn/norm/group_norm_silu",
+}
+
 
 def classify_op_family(op_type: str) -> tuple[str, str, str]:
     normalized = normalize_type(op_type)
@@ -207,9 +230,10 @@ def classify_op_family(op_type: str) -> tuple[str, str, str]:
     if normalized in ELEMENTWISE_TYPES:
         return "elementwise_vector", "ops-math", ELEMENTWISE_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in REDUCTION_TYPES:
-        return "reduction", "ops-math", "ops-math/math"
+        repo = "ops-nn" if normalized == "softmaxv2" else "ops-math"
+        return "reduction", repo, REDUCTION_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in NORM_ACTIVATION_TYPES:
-        return "norm_activation", "ops-nn", "ops-nn/norm_or_activation"
+        return "norm_activation", "ops-nn", NORM_ACTIVATION_SOURCE_PATHS.get(normalized, "ops-nn/norm_or_activation")
     if normalized in INDEX_SCATTER_TYPES:
         return "index_scatter_routing", "ops-nn/ops-transformer", "ops-nn/index_or_ops-transformer/moe"
     if normalized in CV_TYPES:
@@ -351,8 +375,22 @@ def infer_source_strategy(
             return "elementwise_broadcast_vector_pipeline"
         return "elementwise_vector_pipeline"
     if family == "reduction":
-        return "reduction_vector_pipeline"
+        if normalized == "softmaxv2":
+            return "softmax_reduce_exp_sum_normalize"
+        if normalized == "reducemean":
+            return "reduce_tree_with_scale"
+        return "reduce_tree"
     if family == "norm_activation":
+        if normalized in {"swish", "gelu", "swiglu", "gegluv2", "dequantswigluquant"}:
+            return "activation_vector_pipeline"
+        if normalized in {"add_rmsnorm", "addrmsnorm", "inplaceaddrmsnorm", "addrmsnormcast"}:
+            return "rmsnorm_residual_fusion"
+        if normalized == "rmsnorm":
+            return "rmsnorm_reduce_scale"
+        if normalized == "layernormv3":
+            return "layernorm_mean_var_scale"
+        if normalized == "groupnormsilu":
+            return "groupnorm_reduce_silu"
         return "norm_activation_source_pending"
     if family == "index_scatter_routing":
         return "index_scatter_missing_runtime_values"

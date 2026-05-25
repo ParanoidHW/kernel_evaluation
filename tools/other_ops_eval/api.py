@@ -29,6 +29,7 @@ def _other_ops_config(config: dict[str, Any]) -> dict[str, Any]:
         "launch_overhead_us": float(model.get("launch_overhead_us", 0.0)),
         "layout_strided_factor": float(model.get("layout_strided_factor", 1.0)),
         "reduction_passes": float(model.get("reduction_passes", 2.0)),
+        "softmax_passes": float(model.get("softmax_passes", 4.0)),
         "norm_passes": float(model.get("norm_passes", 3.0)),
         "activation_op_factor": float(model.get("activation_op_factor", 4.0)),
         "transcendental_op_factor": float(model.get("transcendental_op_factor", 16.0)),
@@ -71,6 +72,30 @@ def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
     return 1.0
 
 
+def _reduction_passes(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
+    normalized = spec.op_type.replace("_", "").replace("-", "").lower()
+    if normalized == "softmaxv2":
+        return cfg["softmax_passes"]
+    if normalized == "reducemean":
+        return cfg["reduction_passes"] + 1.0
+    return cfg["reduction_passes"]
+
+
+def _norm_activation_passes(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
+    normalized = spec.op_type.replace("_", "").replace("-", "").lower()
+    if normalized in {"swish", "gelu"}:
+        return 1.0
+    if normalized in {"swiglu", "gegluv2", "dequantswigluquant"}:
+        return 1.5
+    if normalized in {"add_rmsnorm", "addrmsnorm", "inplaceaddrmsnorm", "addrmsnormcast"}:
+        return max(cfg["norm_passes"], 4.0)
+    if normalized == "layernormv3":
+        return max(cfg["norm_passes"], 4.0)
+    if normalized == "groupnormsilu":
+        return max(cfg["norm_passes"], 4.0)
+    return cfg["norm_passes"]
+
+
 def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostEstimate:
     cfg = _other_ops_config(config)
     hbm_bandwidth = float(config.get("hbm_bandwidth_tbps", 1.0))
@@ -103,18 +128,20 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
         tiling_source = "source_strategy_replay"
         vector_ops = float(spec.logical_elements) * _elementwise_op_factor(spec, cfg)
     elif spec.op_family == "reduction":
-        tiling_source = "analytic_fallback"
-        traffic_bytes = input_bytes + output_bytes * cfg["reduction_passes"]
+        tiling_source = "source_strategy_replay"
+        passes = _reduction_passes(spec, cfg)
+        traffic_bytes = input_bytes + output_bytes * passes
         workspace_us = _bytes_to_us(output_bytes, hbm_bandwidth)
         sync_overhead_us = 0.0
-        vector_ops = float(sum(spec.input_elements) or spec.logical_elements) * cfg["reduction_passes"]
+        vector_ops = float(sum(spec.input_elements) or spec.logical_elements) * passes
     elif spec.op_family == "norm_activation":
-        tiling_source = "analytic_fallback"
+        tiling_source = "source_strategy_replay"
         if _is_activation_only(spec.op_type):
             traffic_bytes = input_bytes + output_bytes
-            vector_ops = float(spec.logical_elements) * cfg["activation_op_factor"]
+            vector_ops = float(spec.logical_elements) * cfg["activation_op_factor"] * _norm_activation_passes(spec, cfg)
         else:
-            traffic_bytes = (input_bytes + output_bytes) * cfg["norm_passes"]
+            passes = _norm_activation_passes(spec, cfg)
+            traffic_bytes = (input_bytes + output_bytes) * passes
             vector_ops = float(spec.logical_elements) * cfg["activation_op_factor"]
     elif spec.op_family == "index_scatter_routing":
         tiling_source = "analytic_fallback_missing_runtime_values"

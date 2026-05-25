@@ -345,3 +345,44 @@
   - norm_activation：`1.10`
   - index_scatter_routing：`10.89`
   - reduction：`5.53`
+
+## 2026-05-25 other_ops reduction/norm/activation 策略增强
+
+本轮处理第三优先级 reduction/norm/activation：
+
+- `tools/other_ops_eval/common.py` 新增源码映射：
+  - `ReduceSum/ReduceSumD -> ops-math/math/reduce_sum`
+  - `ReduceMean -> ops-math/math/reduce_mean`
+  - `ReduceAll -> ops-math/math/reduce_all`
+  - `SoftmaxV2 -> ops-nn/activation/softmax_v2`
+  - `RmsNorm/LayerNormV3/AddRmsNorm/InplaceAddRmsNorm/AddRmsNormCast -> ops-nn/norm/*`
+  - `Swish/Gelu -> ops-nn/activation/*`
+  - `GroupNormSilu -> ops-nn/norm/group_norm_silu`
+- `source_strategy` 新增：
+  - `reduce_tree`
+  - `reduce_tree_with_scale`
+  - `softmax_reduce_exp_sum_normalize`
+  - `rmsnorm_reduce_scale`
+  - `rmsnorm_residual_fusion`
+  - `layernorm_mean_var_scale`
+  - `activation_vector_pipeline`
+  - `groupnorm_reduce_silu`
+- `tools/other_ops_eval/api.py` 将 reduction/norm 从 analytic fallback 升为 source-strategy 级别：
+  - `ReduceMean` 在 reduce pass 后额外计 scale pass。
+  - `SoftmaxV2` 使用 `softmax_passes` 表达 max/exp/sum/normalize 等源码语义。
+  - RMS/LayerNorm/AddRmsNorm/GroupNormSilu 按 reduce + normalize/fusion pass 计入 traffic。
+- `configs/ascend_910b4*.json`、`configs/ascend_910c.json` 新增 `softmax_passes=4.0`。
+- `docs/architecture.md` 同步更新当前实现状态。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_norm_reduce.csv --unresolved-output /tmp/other_ops_910c_norm_reduce_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72054`
+- unresolved：`344`
+- reduction 中位 `duration_over_estimate`：`5.53 -> 4.92`
+- norm_activation 中位 `duration_over_estimate`：`1.10`
+- top tail 仍不在 reduction/norm，而是缺 runtime attrs 的 `Pack/Slice/Gather`。
