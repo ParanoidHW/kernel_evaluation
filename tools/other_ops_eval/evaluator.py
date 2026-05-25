@@ -83,6 +83,8 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "op_family": spec.op_family,
                     "source_repo": spec.source_repo,
                     "source_path": spec.source_path,
+                    "source_strategy": spec.source_strategy,
+                    "layout_pattern": spec.layout_pattern,
                     "tiling_source": cost.tiling_source,
                     "missing_attrs": spec.missing_attrs,
                     "input_shapes": row.get("Input Shapes", ""),

@@ -272,3 +272,39 @@
 - 模型仍是 analytic fallback / source-strategy 级别，不是 exact tiling replay。
 - `Transpose/Slice/Concat/Split/AsStrided/Gather/Scatter/MoE` 等缺 runtime attrs 或 indices/routing 值的行保留 `missing_runtime_attrs` 和 low confidence。
 - 后续按优先级继续补 layout/memory 源码策略。
+
+## 2026-05-25 other_ops layout/memory 源码策略分类
+
+本轮完成其他算子第一优先级中的 layout/memory 源码策略增强：
+
+- `tools/other_ops_eval/common.py` 将 layout/memory source map 从族级目录细化到具体源码目录：
+  - `Cast -> ops-math/math/cast`
+  - `TensorMove -> ops-math/conversion/tensor_move`
+  - `TransData -> ops-math/conversion/trans_data`
+  - `Transpose -> ops-math/conversion/transpose`
+  - `Slice/StridedSliceD -> ops-math/conversion/slice|strided_slice`
+  - `AsStrided -> ops-math/conversion/as_strided`
+  - `ConcatD/ConcatV2D/SplitVD/Pack -> ops-math/conversion/concat|split|pack`
+- resolved 报告新增 `source_strategy` 和 `layout_pattern`：
+  - 线性路径：`linear_ub_cast`、`linear_ub_copy`
+  - 格式转换：`format_transform_*_simt`
+  - 运行时 attrs 缺失路径：`transpose_nddma_vconv_missing_perm`、`slice_move_align_or_nddma_missing_offsets`、`as_strided_gather_or_move_align_missing_stride`、`concat_axis_strategy_missing_axis`、`pack_to_concat_missing_axis`
+- `tools/other_ops_eval/api.py` 对 layout/memory 使用 `source_strategy_replay` / `source_strategy_replay_missing_attrs` 语义，不把缺 attrs 的路径伪装成 exact tiling。
+- `docs/architecture.md` 同步更新当前实现状态和报告字段。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_layout_strategy.csv --unresolved-output /tmp/other_ops_910c_layout_strategy_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72016`
+- unresolved：`382`
+- family 中位 `duration_over_estimate`：
+  - elementwise_vector：`0.77`
+  - layout_memory：`2.48`
+  - norm_activation：`1.10`
+  - index_scatter_routing：`10.89`
+  - reduction：`5.53`
+- top tail 仍集中在 `Pack/Slice/GatherV2/GatherV3`，原因分别是缺 `axis`、`begin/size/stride` 或 indices 实际值；当前保持 low confidence，不做拟合参数。

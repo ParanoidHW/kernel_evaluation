@@ -67,8 +67,16 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
 
     if spec.op_family == "layout_memory":
         vector_ops = 0.0
-        if spec.missing_attrs:
-            tiling_source = "analytic_fallback_missing_attrs"
+        if spec.source_strategy in {
+            "linear_ub_cast",
+            "linear_ub_copy",
+            "format_transform_nz_nd_simt",
+            "format_transform_5hd_simt",
+            "format_transform_simt",
+        }:
+            tiling_source = "source_strategy_replay"
+        elif spec.missing_attrs:
+            tiling_source = "source_strategy_replay_missing_attrs"
         else:
             tiling_source = "source_strategy_replay"
         if spec.missing_attrs:

@@ -143,6 +143,8 @@ class OtherOpSpec:
     logical_elements: int
     source_repo: str
     source_path: str
+    source_strategy: str
+    layout_pattern: str
     missing_attrs: str = ""
 
 
@@ -163,12 +165,31 @@ def is_other_ops_row(row: dict[str, Any]) -> bool:
     return bool(op_type)
 
 
+LAYOUT_SOURCE_PATHS = {
+    "cast": "ops-math/math/cast",
+    "tensormove": "ops-math/conversion/tensor_move",
+    "transdata": "ops-math/conversion/trans_data",
+    "transpose": "ops-math/conversion/transpose",
+    "slice": "ops-math/conversion/slice",
+    "stridedsliced": "ops-math/conversion/strided_slice",
+    "asstrided": "ops-math/conversion/as_strided",
+    "concatd": "ops-math/conversion/concat",
+    "concatv2d": "ops-math/conversion/concat",
+    "splitvd": "ops-math/conversion/split",
+    "pack": "ops-math/conversion/pack",
+}
+
+ELEMENTWISE_SOURCE_PATHS = {
+    "broadcastto": "ops-math/conversion/broadcast_to",
+}
+
+
 def classify_op_family(op_type: str) -> tuple[str, str, str]:
     normalized = normalize_type(op_type)
     if normalized in LAYOUT_MEMORY_TYPES:
-        return "layout_memory", "ops-math", "ops-math/conversion"
+        return "layout_memory", "ops-math", LAYOUT_SOURCE_PATHS.get(normalized, "ops-math/conversion")
     if normalized in ELEMENTWISE_TYPES:
-        return "elementwise_vector", "ops-math", "ops-math/math"
+        return "elementwise_vector", "ops-math", ELEMENTWISE_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in REDUCTION_TYPES:
         return "reduction", "ops-math", "ops-math/math"
     if normalized in NORM_ACTIVATION_TYPES:
@@ -211,6 +232,8 @@ def build_spec(
     if logical_elements == 0:
         logical_elements = max(input_elements or [0], default=0)
     missing_attrs = infer_missing_attrs(op_type, family)
+    source_strategy = infer_source_strategy(op_type, family, input_formats, output_formats, missing_attrs)
+    layout_pattern = infer_layout_pattern(op_type, family, input_shapes, output_shapes, input_formats, output_formats)
     return OtherOpSpec(
         op_type=op_type,
         op_family=family,
@@ -227,6 +250,8 @@ def build_spec(
         logical_elements=logical_elements,
         source_repo=source_repo,
         source_path=source_path,
+        source_strategy=source_strategy,
+        layout_pattern=layout_pattern,
         missing_attrs=missing_attrs,
     )
 
@@ -245,3 +270,74 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
     if family == "index_scatter_routing":
         missing.append("indices_or_routing_values")
     return "|".join(missing)
+
+
+def infer_source_strategy(
+    op_type: str,
+    family: str,
+    input_formats: list[str],
+    output_formats: list[str],
+    missing_attrs: str,
+) -> str:
+    normalized = normalize_type(op_type)
+    if family == "layout_memory":
+        if normalized == "cast":
+            return "linear_ub_cast"
+        if normalized == "tensormove":
+            return "linear_ub_copy"
+        if normalized == "transdata":
+            formats = {fmt.upper() for fmt in input_formats + output_formats}
+            if any("FRACTAL" in fmt or "NZ" in fmt for fmt in formats):
+                return "format_transform_nz_nd_simt"
+            if any("5HD" in fmt or "C1HWC0" in fmt for fmt in formats):
+                return "format_transform_5hd_simt"
+            return "format_transform_simt"
+        if normalized == "transpose":
+            return "transpose_nddma_vconv_missing_perm" if missing_attrs else "transpose_nddma_vconv"
+        if normalized in {"slice", "stridedsliced"}:
+            return "slice_move_align_or_nddma_missing_offsets" if missing_attrs else "slice_move_align_or_nddma"
+        if normalized == "asstrided":
+            return "as_strided_gather_or_move_align_missing_stride" if missing_attrs else "as_strided_gather_or_move_align"
+        if normalized in {"concatd", "concatv2d"}:
+            return "concat_axis_strategy_missing_axis" if missing_attrs else "concat_axis_strategy"
+        if normalized == "splitvd":
+            return "split_axis_strategy_missing_axis" if missing_attrs else "split_axis_strategy"
+        if normalized == "pack":
+            return "pack_to_concat_missing_axis" if missing_attrs else "pack_to_concat"
+    if family == "elementwise_vector":
+        return "elementwise_vector_pipeline"
+    if family == "reduction":
+        return "reduction_vector_pipeline"
+    if family == "norm_activation":
+        return "norm_activation_source_pending"
+    if family == "index_scatter_routing":
+        return "index_scatter_missing_runtime_values"
+    if family == "cv_regular":
+        return "cv_source_pending"
+    return "unsupported"
+
+
+def infer_layout_pattern(
+    op_type: str,
+    family: str,
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    input_formats: list[str],
+    output_formats: list[str],
+) -> str:
+    if family != "layout_memory":
+        return ""
+    normalized = normalize_type(op_type)
+    if normalized in {"cast", "tensormove"}:
+        return "linear"
+    if normalized == "transdata":
+        return "format_change" if input_formats != output_formats else "format_preserve"
+    if normalized == "transpose":
+        return "rank_permutation"
+    if normalized in {"slice", "stridedsliced", "asstrided"}:
+        return "strided_region"
+    if normalized in {"concatd", "concatv2d", "splitvd", "pack"}:
+        return "axis_segment"
+    if input_shapes and output_shapes and input_shapes[0] == output_shapes[0]:
+        return "shape_preserve"
+    return "layout_transform"
