@@ -214,3 +214,26 @@
 - ds3.2 `QuantBatchMatmulV3` Weight-NZ/full-quant 已完成一轮可解释建模。
 - 剩余残差在现有 profiling/source 信息下均不具备继续完成的充分支撑，全部转入遗留清单。
 - 后续若补齐 exact tiling、runtime metadata 或平台级模板基准，再恢复对应项。
+
+## 2026-05-25 其他算子评估方案计划
+
+本轮确认新增源码目录：
+
+- `ops-math`
+- `ops-cv`
+
+已将其他算子评估方案写入 `docs/architecture.md` 的“其他算子评估方案”章节。
+
+首轮处理顺序：
+
+1. layout/memory 类：`Cast`、`Transpose`、`TransData`、`TensorMove`、`Slice`、`StridedSliceD`、`AsStrided`、`ConcatD/ConcatV2D`、`SplitVD`。
+2. elementwise/vector 类：`Add`、`Mul`、`Sub`、`Neg`、`RealDiv`、`Pows`、比较和填充类。
+3. reduction/norm/activation 类：`ReduceSum`、`ReduceMean`、`RmsNorm`、`LayerNormV3`、`AddRmsNorm`、`InplaceAddRmsNorm`、`Swish`、`Gelu`、`SwiGlu`。
+4. index/scatter/routing 类：`GatherV2/V3`、`ScatterUpdate`、`ScatterNdUpdate`、`TopKV2`、`Moe*`。
+5. CV/常规大 kernel：`Conv3DV2`、`GroupNormSilu`、`Resize*`、`GridSample*`、ROI/NMS 类。
+
+原则：
+
+- 通信类 `Hcom*`、`hcom_*`、AICPU 通信辅助和 `AllGatherMatmul*` 首轮排除。
+- 缺少运行时 attrs 的复杂 layout/index/routing 算子只能做 fallback、bounds 或 unresolved，不能声称 exact replay。
+- 成本模型先建立 vector/HBM/layout/reduction/workspace/launch 分量，不做 per-shape 拟合。

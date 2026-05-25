@@ -6,6 +6,8 @@
 /ops-nn
 /ops-math-master/
 /ops-cv-master/
+/ops-math
+/ops-cv
 /*.zip
 
 # Generated evaluator outputs.
