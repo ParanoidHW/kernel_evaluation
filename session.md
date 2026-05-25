@@ -516,3 +516,41 @@
 - `Pack/Slice/Gather` overestimate：都属于缺 axis/offset/indices 的低置信路径。后续需要 profiling attrs、host tiling data 或运行时输入摘要；不应通过降低 HBM 带宽或随机访问因子拟合。
 - `Conv2D`：已分类为 `cv_regular`，但当前只是 fallback。后续应按 `ops-nn/conv/conv2d_v2` tiling、Cube FLOPs、NC1HWC0/FRACTAL_Z storage、L0/L1/BT 和 bias/scale/fixpipe 路径单独建模。
 - 全量 unresolved 的 `AutomaticBufferFusionOp/DynamicQuant/Rsqrt/RotaryMul/InterleaveRope/KvRmsNormRopeCache/MlaPrologV3` 需要新一轮按 transformer/vector fusion 类设计，不应混入本轮 basic other_ops fallback。
+
+## 2026-05-25 eval_results other_ops 快照刷新
+
+本轮按当前 commit `9969381` 刷新 `eval_results`，新增快照：
+
+- `eval_results/20260525T110812Z_9969381`
+- `eval_results/LATEST` 已指向该目录。
+
+产物：
+
+- `eval_summary.csv`：沿用历史大 shape / Cube occupied 过滤口径，便于和旧 MatMul/Attention/GMM summary 共存。
+- `other_ops_eval_summary.csv`：新增 other_ops 专用汇总，按所有 resolved other_ops 行统计，不使用 Cube 过滤。
+- `metadata.txt`：记录 commit、报告数量、配置和 summary 口径。
+- 详细 resolved/unresolved CSV 已在本地同名目录生成，但按 `eval_results/.gitignore` 约定不提交。
+
+覆盖报告：
+
+- `other_ops_eval_report_910b4.csv`：`example_profilings/910B4` + `configs/ascend_910b4.json`
+- `other_ops_eval_report_910c.csv`：`example_profilings/910C` + `configs/ascend_910c.json`
+- `profiling_with_model_code_ds32_other_ops_eval_910c.csv`
+- `profiling_with_model_code_gemma_other_ops_eval_910b4.csv`
+- `profiling_with_model_code_longcat_other_ops_eval_910b4.csv`
+- `profiling_with_model_code_qwen7b_other_ops_eval_910b4_1.csv`
+
+other_ops 专用 summary 结果：
+
+- 910B4：rows `9285`，unresolved `923`，rel max `639.020`，p95 `2.234`，median `0.533`。top tail 为缺 indices 的 `GatherV2`。
+- 910C：rows `72364`，unresolved `34`，rel max `5.710`，p95 `0.554`，median `0.299`。top tail 为缺 axis 的 `Pack`，unresolved 仅 `MemSet`。
+- ds3.2：rows `2980`，unresolved `870`，rel max `16.635`，p95 `1.476`，median `0.614`。主要 unresolved 为 `DynamicQuant/RotaryMul/MlaPrologV3/LightningIndexerQuant`。
+- gemma：rows `2820`，unresolved `555`，rel max `47.205`，p95 `3.729`，median `0.521`。主要 unresolved 为 `AutomaticBufferFusionOp/RotaryMul/MoeComputeExpertTokens`。
+- longcat：rows `640`，unresolved `101`，rel max `666.847`，p95 `0.961`，median `0.465`。主要 unresolved 为 `InterleaveRope/KvRmsNormRopeCache`。
+- qwen7b 910B4-1：rows `3882`，unresolved `195`，rel max `148.856`，p95 `0.857`，median `0.329`。主要 unresolved 为 `Rsqrt`。
+
+结论：
+
+- 基础 910C other_ops 覆盖已经较完整；剩余 `MemSet` 需要 profiling 补规格或上下文解析。
+- 910B4/模型样本最大误差主要来自 `GatherV2/GatherV3` 缺 indices，当前为低置信 fallback，不能用随机访问因子拟合。
+- 下一轮优先处理 transformer/vector fusion 类 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`AutomaticBufferFusionOp`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens`。

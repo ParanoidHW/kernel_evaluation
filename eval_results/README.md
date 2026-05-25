@@ -3,6 +3,7 @@
 本目录保存本地评估汇总，便于按时间和 commit 回溯。每次评估放在独立子目录中，避免多个 CSV 混在一起。
 
 - `<UTC时间>_<commit>/eval_summary.csv`：该次评估的汇总表。
+- `<UTC时间>_<commit>/other_ops_eval_summary.csv`：其他算子专用汇总表；按所有 evaluated 行统计，不使用 Cube large-occupied 过滤。
 - `<UTC时间>_<commit>/metadata.txt`：该次评估的时间、commit 和报告数量。
 - `LATEST`：最近一次评估子目录名。
 
@@ -22,6 +23,34 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 - 如果需要保留详细 resolved/unresolved CSV，应放入同一个带时间和 commit 的子目录，而不是直接散放在 `eval_results/` 根目录。
 
 注意：`LATEST` 仅表示最近一次本地基线快照。若代码继续变更，应重新生成新的 `<UTC时间>_<commit>/` 子目录，不要把历史裸 CSV 或旧快照当作当前结论。
+
+## 最新 other_ops 快照
+
+当前 `LATEST` 指向 `20260525T110812Z_9969381`，对应 commit `9969381`，覆盖本轮新增 `other_ops` 评估器的 6 组报告。
+
+说明：
+
+- `eval_summary.csv` 仍使用历史兼容的大 shape / Cube occupied 过滤口径，便于和 MatMul/Attention/GMM 旧 summary 共存。
+- `other_ops_eval_summary.csv` 是本轮主要口径，按所有 resolved other_ops 行统计 max/p95/p90/median、family median 和 unresolved top types。
+- 详细 resolved/unresolved CSV 已在本地同名目录生成，但按 `.gitignore` 约定不提交。
+
+`other_ops_eval_summary.csv` 关键结果：
+
+| 报告 | rows | unresolved | rel max | p95 | median | duration/estimate median | 主要 tail | 主要 unresolved |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| `other_ops_eval_report_910b4` | 9285 | 923 | 639.020 | 2.234 | 0.533 | 1.136 | `GatherV2` 缺 indices | `AutomaticBufferFusionOp`、`RotaryMul`、`MemSet` |
+| `other_ops_eval_report_910c` | 72364 | 34 | 5.710 | 0.554 | 0.299 | 0.770 | `Pack/Slice/Gather` 缺 attrs/indices | `MemSet` |
+| `profiling_with_model_code_ds32_other_ops_eval_910c` | 2980 | 870 | 16.635 | 1.476 | 0.614 | 1.210 | `GatherV2` 缺 indices | `DynamicQuant`、`RotaryMul`、`MlaPrologV3` |
+| `profiling_with_model_code_gemma_other_ops_eval_910b4` | 2820 | 555 | 47.205 | 3.729 | 0.521 | 1.158 | `GatherV2/Scatter` 缺 indices | `AutomaticBufferFusionOp`、`RotaryMul`、`MoeComputeExpertTokens` |
+| `profiling_with_model_code_longcat_other_ops_eval_910b4` | 640 | 101 | 666.847 | 0.961 | 0.465 | 0.825 | `GatherV2` 缺 indices | `InterleaveRope`、`KvRmsNormRopeCache` |
+| `profiling_with_model_code_qwen7b_other_ops_eval_910b4_1` | 3882 | 195 | 148.856 | 0.857 | 0.329 | 1.295 | `GatherV2` 缺 indices | `Rsqrt` |
+
+本轮结论：
+
+- 910C 基础 other_ops 覆盖已较完整，unresolved 只剩 `MemSet N/A` 34 行。
+- 910B4 / 模型样本 top tail 大多来自 index/scatter/gather 缺少 indices 或 selected count，当前是明确 low-confidence fallback，不能用随机访问因子拟合。
+- 模型样本新增 unresolved 主要是 transformer/vector fusion：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`，应作为下一轮算子族设计处理。
+- `Conv2D` 已归入 `cv_regular`，但当前仍是低置信 fallback，后续需要按 `ops-nn/conv/conv2d_v2` host tiling/Cube 路径单独建模。
 
 ## 最新增量快照
 

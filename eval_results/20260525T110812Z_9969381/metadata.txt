@@ -1,0 +1,6 @@
+evaluated_at_utc=20260525T110812Z
+commit=9969381
+reports=6
+op_kind=other_ops
+configs=ascend_910b4.json;ascend_910c.json;ascend_910b4_1.json
+summary=eval_summary.csv uses existing large-occupied compatibility filter; other_ops_eval_summary.csv uses all evaluated other_ops rows.
