@@ -90,6 +90,17 @@
       "notes": "arch35 QuantBatchMatmulV3 Weight-NZ per-channel path copies scale into L1 and emits Fixpipe tensor output by N tile with disableGemv=true; this term models current-kernel epilogue/sync overhead and does not modify ideal lower bound."
     }
   },
+  "other_ops_model": {
+    "description": "First-pass current-kernel model for AIV/layout/regular ops. Values are platform-level floors and throughput assumptions, not per-shape fitted curves.",
+    "vector_bandwidth_tbps": 1.6,
+    "vector_gops": 4000.0,
+    "launch_overhead_us": 2.0,
+    "layout_strided_factor": 1.0,
+    "reduction_passes": 2.0,
+    "norm_passes": 3.0,
+    "activation_op_factor": 4.0,
+    "index_random_access_factor": 1.5
+  },
   "calibration": {
     "launch_overhead_us_by_type": {
       "default": 0.0,

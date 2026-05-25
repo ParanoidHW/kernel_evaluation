@@ -25,7 +25,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--op-kind",
         default="matmul",
-        choices=["matmul", "grouped_matmul", "attention"],
+        choices=["matmul", "grouped_matmul", "attention", "other_ops"],
         help="Operator family to evaluate. Default: matmul.",
     )
     parser.add_argument("--output", help="Write detailed resolved report CSV.")
@@ -55,6 +55,8 @@ def main(argv: list[str]) -> int:
 
     if args.op_kind == "attention":
         from attention_eval.evaluator import print_summary
+    elif args.op_kind == "other_ops":
+        from other_ops_eval.evaluator import print_summary
     else:
         from matmul_eval.evaluator import print_summary
 

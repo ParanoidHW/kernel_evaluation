@@ -81,6 +81,17 @@
   "attention_model": {
     "fused_infer_decode_latency_floor_us": 21.5
   },
+  "other_ops_model": {
+    "description": "First-pass current-kernel model for AIV/layout/regular ops on qwen3-7b 910B4-1 bandwidth setting.",
+    "vector_bandwidth_tbps": 1.6,
+    "vector_gops": 3200.0,
+    "launch_overhead_us": 2.0,
+    "layout_strided_factor": 1.0,
+    "reduction_passes": 2.0,
+    "norm_passes": 3.0,
+    "activation_op_factor": 4.0,
+    "index_random_access_factor": 1.5
+  },
   "calibration": {
     "launch_overhead_us_by_type": {
       "default": 0.0,

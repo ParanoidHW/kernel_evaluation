@@ -237,3 +237,38 @@
 - 通信类 `Hcom*`、`hcom_*`、AICPU 通信辅助和 `AllGatherMatmul*` 首轮排除。
 - 缺少运行时 attrs 的复杂 layout/index/routing 算子只能做 fallback、bounds 或 unresolved，不能声称 exact replay。
 - 成本模型先建立 vector/HBM/layout/reduction/workspace/launch 分量，不做 per-shape 拟合。
+
+## 2026-05-25 other_ops 基础框架
+
+本轮完成 `other_ops` 第一阶段基础框架：
+
+- 新增 `tools/other_ops_eval/`：
+  - `common.py`：Type 分类、shape/dtype/format 解析、source map、缺失 attrs 标记。
+  - `api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
+  - `evaluator.py`：profiling CSV 读取、resolved/unresolved 报告和 summary。
+- `tools/op_eval/api.py` / `tools/op_eval/cli.py` 注册 `op_kind=other_ops`。
+- `configs/ascend_910b4*.json`、`configs/ascend_910c.json` 新增 `other_ops_model` 平台级参数。
+- `docs/architecture.md` 更新当前实现状态、验证命令和后续任务。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_stage1.csv --unresolved-output /tmp/other_ops_910c_stage1_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72016`
+- unresolved：`382`
+- family 概况：
+  - elementwise_vector：`67264`
+  - layout_memory：`3012`
+  - norm_activation：`828`
+  - index_scatter_routing：`656`
+  - reduction：`256`
+- 主要 unresolved：`RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`Tile`、`Cos`、`Sin`。
+
+当前限制：
+
+- 模型仍是 analytic fallback / source-strategy 级别，不是 exact tiling replay。
+- `Transpose/Slice/Concat/Split/AsStrided/Gather/Scatter/MoE` 等缺 runtime attrs 或 indices/routing 值的行保留 `missing_runtime_attrs` 和 low confidence。
+- 后续按优先级继续补 layout/memory 源码策略。

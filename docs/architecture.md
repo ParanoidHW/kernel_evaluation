@@ -86,9 +86,15 @@ python3 tools/eval_ops.py --op-kind attention ...
 - occupancy、traffic factor、workspace、sync、latency floor、template factor current-kernel 成本
 - QSFA PA cache 专用 parser 和 workspace 模型
 
-### other_ops（规划中）
+### other_ops
 
-后续新增 `other_ops` 评估入口，覆盖 profiling 中非 MatMul/GMM/Attention/通信类的常规算子。源码来源以当前新增目录为主：
+CLI：
+
+```bash
+python3 tools/eval_ops.py --op-kind other_ops ...
+```
+
+覆盖 profiling 中非 MatMul/GMM/Attention/通信类的常规算子。源码来源以当前新增目录为主：
 
 - `ops-math`：elementwise、conversion、reduction、layout 和部分数学算子。
 - `ops-cv`：resize、grid sample、ROI/NMS、图像采样和 CV 数据处理算子。
@@ -122,7 +128,7 @@ tools/matmul_eval/
 tools/attention_eval/
   -> Attention parser、source replay、成本模型和报告
 
-tools/other_ops_eval/      # 规划中
+tools/other_ops_eval/
   -> 常规 vector/layout/reduction/CV 算子 parser、源码策略分类和成本模型
 
 configs/
@@ -178,7 +184,7 @@ tools/eval_ops.py
 matmul
 grouped_matmul
 attention
-other_ops   # 规划中
+other_ops
 ```
 
 CLI 参数在 `tools/op_eval/cli.py`：
@@ -475,15 +481,41 @@ CV：
 
 unresolved 至少保留原始 shape/dtype/format、缺失 attrs 和 source lookup 失败原因。
 
-### 实施任务拆分
+### 当前实现状态
 
-1. 新增 `tools/other_ops_eval/`，实现通用 shape/dtype/format parser、Type 分类和 source map。
-2. 注册 `op_kind=other_ops`，支持 CLI 输出 resolved/unresolved。
-3. 先实现 layout/memory 类 analytic fallback 和部分 source strategy replay。
-4. 实现 elementwise/vector 类成本模型，作为 AIV/HBM 基线。
-5. 增加 reduction/norm/activation 的 pass-based 模型。
-6. 对 index/scatter/routing 输出 bounds/unresolved，避免无 indices 拟合。
-7. 按 `example_profilings/` 全量刷新 other_ops 基线，分析 top tail 后再决定下一类源码 replay。
+已实现：
+
+- `tools/other_ops_eval/common.py`：Type 分类、shape/dtype/format 解析、source map 和缺失 attrs 标记。
+- `tools/other_ops_eval/api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
+- `tools/other_ops_eval/evaluator.py`：profiling CSV 读取、resolved/unresolved 报告、summary 输出。
+- `tools/op_eval/api.py` / `tools/op_eval/cli.py`：注册 `op_kind=other_ops`。
+- `configs/*.json::other_ops_model`：平台级 AIV/layout 基础参数，包括 vector bandwidth、vector GOPS、统一 launch floor、pass 数和随机访问因子。
+
+910C 样本首轮验证：
+
+```bash
+python3 tools/eval_ops.py --op-kind other_ops \
+  --profiling example_profilings/910C \
+  --config configs/ascend_910c.json \
+  --output /tmp/other_ops_910c_stage1.csv \
+  --unresolved-output /tmp/other_ops_910c_stage1_unresolved.csv
+```
+
+结果：
+
+- resolved：`72016`
+- unresolved：`382`
+- 主要 unresolved：`RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`Tile`、`Cos`、`Sin` 等未纳入首轮分类的算子。
+- 当前模型是 fallback/source-strategy 级别，不是 exact tiling replay。
+
+### 后续实施任务
+
+1. 对 layout/memory 类继续补 source strategy replay，优先 `Cast/TensorMove/TransData/Transpose/Slice/Concat`。
+2. 对 elementwise/vector 类按源码补 broadcast、scalar input、dtype cast 和 small tensor 模板分类。
+3. 对 reduction/norm/activation 类按源码 pass 数和 workspace 继续细化。
+4. 对 index/scatter/routing 类在缺 indices/routing 值时保持 low confidence 或 bounds，不做校准拟合。
+5. 将 `RotaryPositionEmbedding`、`MemSet`、`Tile`、`Cos`、`Sin` 等 unresolved 分类后再逐项处理。
+6. 按 `example_profilings/` 全量刷新 other_ops 基线，分析 top tail 后再进入下一轮迭代。
 
 ## 平台配置
 
