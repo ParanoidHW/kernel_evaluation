@@ -1,6 +1,6 @@
 # Kernel 评估工具
 
-本仓库用于根据导出的 profiling CSV 估算昇腾算子 kernel 耗时。当前重点覆盖 `MatMul`、`GroupedMatmul` 和 Attention 家族，设计原则是从 kernel 实现、tiling 逻辑和硬件约束出发建立可解释模型，而不是对历史样本做黑盒拟合。
+本仓库用于根据导出的 profiling CSV 估算昇腾算子 kernel 耗时。当前重点覆盖 `MatMul`、`GroupedMatmul`、Attention 家族和常规 other_ops，设计原则是从 kernel 实现、tiling 逻辑和硬件约束出发建立可解释模型，而不是对历史样本做黑盒拟合。
 
 ## 仓库范围
 
@@ -11,6 +11,7 @@
 - MatMul 设计文档：`docs/matmul_eval_design_zh.md`
 - GroupedMatmul 设计文档：`docs/gmm_eval_design_zh.md`
 - Attention 设计文档：`docs/attention_kernel_eval_design.md`
+- Other Ops 设计文档：`docs/other_ops_eval_design_zh.md`
 
 ## 目录说明
 
@@ -19,6 +20,7 @@
 - `tools/op_eval/`：共享配置、profiling 解析、API 和报告逻辑
 - `tools/matmul_eval/`：MatMul / GroupedMatmul 解析、tiling、成本模型和报告
 - `tools/attention_eval/`：Attention 解析、source strategy replay、成本模型和报告
+- `tools/other_ops_eval/`：layout、elementwise、reduction、norm/activation、index/scatter、CV 常规算子解析、source strategy 分类和 fallback 成本模型
 - `configs/`：平台配置和模型相关参数
 - `docs/`：架构、设计、误差分析和硬件补充文档
 - `example_profilings/`：已有 profiling 样本和说明
@@ -49,6 +51,14 @@
 - HBM 最小流量与当前 kernel 流量放大
 - `ops-transformer` source strategy replay
 - FIA / FA / PFA / IFA / QSFA 路径支持
+
+### Other Ops
+
+- layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 常规大 kernel 分类
+- `ops-math`、`ops-nn`、`ops-transformer-master`、`ops-cv` source map
+- `source_strategy`、`layout_pattern`、`missing_attrs` 诊断字段
+- AIV/HBM/pass/launch/source-strategy fallback 成本模型
+- 对缺 axis/stride/indices/routing 的路径保留 low-confidence 诊断，不做样本拟合
 
 ## 常用命令
 

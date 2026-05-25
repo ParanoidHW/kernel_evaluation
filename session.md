@@ -554,3 +554,19 @@ other_ops 专用 summary 结果：
 - 基础 910C other_ops 覆盖已经较完整；剩余 `MemSet` 需要 profiling 补规格或上下文解析。
 - 910B4/模型样本最大误差主要来自 `GatherV2/GatherV3` 缺 indices，当前为低置信 fallback，不能用随机访问因子拟合。
 - 下一轮优先处理 transformer/vector fusion 类 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`AutomaticBufferFusionOp`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens`。
+
+## 2026-05-25 other_ops 设计文档补齐
+
+用户指出其他算子的评估方案没有形成独立 docs 文档。本轮补齐：
+
+- 新增 `docs/other_ops_eval_design_zh.md`，按当前实现详细记录：
+  - `other_ops` CLI/API 入口和配置项。
+  - layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、cv_regular 的 Type 覆盖。
+  - `ops-math`、`ops-nn`、`ops-transformer-master`、`ops-cv` source map。
+  - `source_strategy`、`layout_pattern`、`missing_attrs` 语义。
+  - AIV/HBM/pass/launch/source-strategy fallback 成本模型。
+  - resolved/unresolved 报告字段。
+  - `eval_results/20260525T110812Z_9969381` other_ops 当前基线。
+  - `MemSet N/A`、`Gather/Scatter` 缺 indices、`Conv2D` 低置信 fallback、transformer/vector fusion unresolved 等限制。
+- `docs/architecture.md` 的算子族入口新增 Other Ops 设计文档链接，并将旧 TODO 改成当前已完成/剩余任务状态。
+- `README.md` 新增 Other Ops 设计文档入口和当前能力摘要。

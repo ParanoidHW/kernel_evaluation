@@ -5,7 +5,7 @@
 - MatMul：`docs/matmul_eval_design_zh.md`
 - GroupedMatmul：`docs/gmm_eval_design_zh.md`
 - Attention：`docs/attention_kernel_eval_design.md`
-- 其他算子评估方案：本文“其他算子评估方案”章节
+- Other Ops：`docs/other_ops_eval_design_zh.md`
 - 当前评估差距：`docs/current_eval_gap_zh.md`
 - 硬件信息补充：`docs/info.md`
 
@@ -339,6 +339,8 @@ attention_eval.evaluator
 
 ## 其他算子评估方案
 
+详细设计见 `docs/other_ops_eval_design_zh.md`。本节保留架构层摘要，具体 Type 覆盖、source map、策略标签、成本公式、报告字段、最新基线和限制以独立设计文档为准。
+
 ### 范围和排除规则
 
 `other_ops` 首轮覆盖 profiling `Type` 中的常规 AIC/AIV 算子，排除：
@@ -516,12 +518,22 @@ python3 tools/eval_ops.py --op-kind other_ops \
 
 ### 后续实施任务
 
-1. 对 layout/memory 类继续补 source strategy replay，优先 `Cast/TensorMove/TransData/Transpose/Slice/Concat`。
-2. 对 elementwise/vector 类按源码补 broadcast、scalar input、dtype cast 和 small tensor 模板分类。
-3. 对 reduction/norm/activation 类按源码 pass 数和 workspace 继续细化。
-4. 对 index/scatter/routing 类在缺 indices/routing 值时保持 low confidence 或 bounds，不做校准拟合。
-5. 将 `RotaryPositionEmbedding`、`MemSet`、`Tile`、`Cos`、`Sin` 等 unresolved 分类后再逐项处理。
-6. 按 `example_profilings/` 全量刷新 other_ops 基线，分析 top tail 后再进入下一轮迭代。
+已完成：
+
+- layout/memory source map 和 `source_strategy/layout_pattern` 分类。
+- elementwise/vector 的 scalar/broadcast/fill/expensive/transcendental/Rope 分类。
+- reduction/norm/activation 的源码路径、pass 语义和策略标签。
+- index/scatter/routing 的源码路径、缺失运行时值标记和 low-confidence fallback。
+- `RotaryPositionEmbedding`、`Range`、`Conv2D` tail 分类。
+- `eval_results/20260525T110812Z_9969381` other_ops 基线刷新。
+
+剩余任务：
+
+1. 为 transformer/vector fusion 建独立设计：`RotaryMul`、`InterleaveRope`、`KvRmsNormRopeCache`、`MlaPrologV3`、`DynamicQuant`、`Rsqrt`。
+2. 为 `Conv2D` 建立 `ops-nn/conv/conv2d_v2` 评估模型，按 Cube FLOPs、NC1HWC0/FRACTAL_Z storage、tiling、L0/L1/BT、bias/scale/fixpipe 拆分。
+3. 为 index/scatter 增加 bounds 语义；缺 indices 时输出可解释区间，而不是单点 overestimate。
+4. 若 profiling 能补 attrs，恢复 `Transpose/Slice/Pack/Tile/AsStrided/Concat` 的更精确 source replay。
+5. 把 `tools/annotate_profiling.py` 扩展为调用 `other_ops`，让非 MatMul/GMM/Attention 的已支持 Type 也能写入 `kernel_eval_value`。
 
 ## 平台配置
 
