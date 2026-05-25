@@ -99,9 +99,14 @@ NORM_ACTIVATION_TYPES = {
 INDEX_SCATTER_TYPES = {
     "gatherv2",
     "gatherv3",
+    "gatherelements",
     "scatter",
     "scatterupdate",
     "scatterndupdate",
+    "scatterelementsv2",
+    "maskedselectv3",
+    "linearindex",
+    "nonzero",
     "topkv2",
     "argmaxv2",
     "index",
@@ -222,6 +227,31 @@ NORM_ACTIVATION_SOURCE_PATHS = {
     "groupnormsilu": "ops-nn/norm/group_norm_silu",
 }
 
+INDEX_SCATTER_SOURCE_PATHS = {
+    "gatherv2": "ops-nn/index/gather_v2",
+    "gatherv3": "ops-nn/index/gather_v3",
+    "gatherelements": "ops-nn/index/gather_elements",
+    "scatter": "ops-nn/index/scatter",
+    "scatterupdate": "ops-nn/index/scatter",
+    "scatterndupdate": "ops-nn/index/scatter_nd",
+    "scatterelementsv2": "ops-nn/index/scatter_elements_v2",
+    "maskedselectv3": "ops-math/conversion/masked_select_v3",
+    "linearindex": "ops-nn/index/linear_index",
+    "nonzero": "ops-nn/index/non_zero",
+    "topkv2": "ops-nn/index/apply_top_k_top_p_with_sorted",
+    "index": "ops-nn/index/index",
+    "moegatingtopksoftmax": "ops-transformer-master/moe/moe_gating_top_k_softmax",
+    "moegatingtopk": "ops-transformer-master/moe/moe_gating_top_k",
+    "moegatingtopkhash": "ops-transformer-master/moe/moe_gating_top_k",
+    "moeinitrouting": "ops-transformer-master/moe/moe_init_routing",
+    "moeinitroutingv3": "ops-transformer-master/moe/moe_init_routing_v3",
+    "moecomputerexperttokens": "ops-transformer-master/moe/moe_compute_expert_tokens",
+    "moefinalizeroutingv2": "ops-transformer-master/moe/moe_finalize_routing_v2",
+    "moererouting": "ops-transformer-master/moe/moe_re_routing",
+    "moedistributedispatchv2": "ops-transformer-master/mc2/moe_distribute_dispatch_v2",
+    "moedistributecombinev2": "ops-transformer-master/mc2/moe_distribute_combine_v2",
+}
+
 
 def classify_op_family(op_type: str) -> tuple[str, str, str]:
     normalized = normalize_type(op_type)
@@ -235,7 +265,11 @@ def classify_op_family(op_type: str) -> tuple[str, str, str]:
     if normalized in NORM_ACTIVATION_TYPES:
         return "norm_activation", "ops-nn", NORM_ACTIVATION_SOURCE_PATHS.get(normalized, "ops-nn/norm_or_activation")
     if normalized in INDEX_SCATTER_TYPES:
-        return "index_scatter_routing", "ops-nn/ops-transformer", "ops-nn/index_or_ops-transformer/moe"
+        source_path = INDEX_SCATTER_SOURCE_PATHS.get(normalized, "ops-nn/index_or_ops-transformer/moe")
+        source_repo = "ops-transformer-master" if source_path.startswith("ops-transformer-master") else "ops-nn"
+        if source_path.startswith("ops-math"):
+            source_repo = "ops-math"
+        return "index_scatter_routing", source_repo, source_path
     if normalized in CV_TYPES:
         return "cv_regular", "ops-cv", "ops-cv/image_or_objdetect"
     return "unsupported_other", "", ""
@@ -320,7 +354,14 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
     if normalized == "asstrided":
         missing.extend(["size", "stride", "storage_offset"])
     if family == "index_scatter_routing":
-        missing.append("indices_or_routing_values")
+        if normalized.startswith("moe"):
+            missing.append("routing_values")
+        elif normalized in {"topkv2", "maskedselectv3", "nonzero"}:
+            missing.append("selected_count_or_mask_values")
+        elif normalized == "linearindex":
+            missing.append("index_values")
+        else:
+            missing.append("indices_or_scatter_values")
     return "|".join(missing)
 
 
@@ -393,6 +434,18 @@ def infer_source_strategy(
             return "groupnorm_reduce_silu"
         return "norm_activation_source_pending"
     if family == "index_scatter_routing":
+        if normalized in {"gatherv2", "gatherv3", "gatherelements"}:
+            return "gather_random_read_missing_indices"
+        if normalized in {"scatter", "scatterupdate", "scatterndupdate", "scatterelementsv2"}:
+            return "scatter_random_write_missing_indices"
+        if normalized in {"maskedselectv3", "nonzero"}:
+            return "mask_compaction_missing_selected_count"
+        if normalized == "linearindex":
+            return "linear_index_missing_indices"
+        if normalized == "topkv2":
+            return "topk_sort_select_missing_k_distribution"
+        if normalized.startswith("moe"):
+            return "moe_routing_missing_token_distribution"
         return "index_scatter_missing_runtime_values"
     if family == "cv_regular":
         return "cv_source_pending"

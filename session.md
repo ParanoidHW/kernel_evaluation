@@ -386,3 +386,46 @@
 - reduction 中位 `duration_over_estimate`：`5.53 -> 4.92`
 - norm_activation 中位 `duration_over_estimate`：`1.10`
 - top tail 仍不在 reduction/norm，而是缺 runtime attrs 的 `Pack/Slice/Gather`。
+
+## 2026-05-25 other_ops index/scatter/routing 分类增强
+
+本轮处理第四优先级 index/scatter/routing：
+
+- `tools/other_ops_eval/common.py` 新增分类：
+  - `GatherElements`
+  - `ScatterElementsV2`
+  - `MaskedSelectV3`
+  - `LinearIndex`
+  - `NonZero`
+- source map 补充到：
+  - `ops-nn/index/gather_v2|gather_v3|gather_elements`
+  - `ops-nn/index/scatter|scatter_nd|scatter_elements_v2`
+  - `ops-math/conversion/masked_select_v3`
+  - `ops-nn/index/linear_index|non_zero`
+  - `ops-transformer-master/moe/*` / `mc2/*` MoE routing 目录
+- `missing_attrs` 从统一 `indices_or_routing_values` 细化为：
+  - `indices_or_scatter_values`
+  - `selected_count_or_mask_values`
+  - `index_values`
+  - `routing_values`
+- `source_strategy` 细化为：
+  - `gather_random_read_missing_indices`
+  - `scatter_random_write_missing_indices`
+  - `mask_compaction_missing_selected_count`
+  - `linear_index_missing_indices`
+  - `topk_sort_select_missing_k_distribution`
+  - `moe_routing_missing_token_distribution`
+- 成本模型仍保持 low confidence 的 random-access fallback，不引入无 indices/routing 支撑的校准。
+- `docs/architecture.md` 同步更新当前实现状态。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_index.csv --unresolved-output /tmp/other_ops_910c_index_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72072`，较上一轮 `72054` 增加 `18`
+- unresolved：`326`，较上一轮 `344` 减少 `18`
+- 主要 unresolved 缩减为 `RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`Range`。
+- index_scatter_routing 中位 `duration_over_estimate`：`10.83`，仍为低置信；主因是 profiling 缺 indices、mask selected count、routing/token 分布。
