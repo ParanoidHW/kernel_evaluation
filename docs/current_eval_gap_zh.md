@@ -93,20 +93,24 @@ GMM routing-bound 结果来自 `20260522T081103Z_0a7ccb1`：
 
 ## 1. ds3.2 QuantBatchMatmulV3
 
-当前最大普通 MatMul gap 来自 ds3.2 910C `QuantBatchMatmulV3`：
+已完成一轮 `QuantBatchMatmulV3` Weight-NZ epilogue 建模：
 
-- large max：`0.689`
-- p95：`0.657`
-- median：`0.318`
+- 源码依据：arch35 `BlockMmadA8W8FixpipeQuant`，per-channel scale 按 N tile 进入 L1，fixpipe 输出阶段消费 scale/quant 参数，且该路径 `disableGemv=true`。
+- 触发范围：`QuantBatchMatmulV3`、Weight-NZ、`per_channel_n`、`full_quant`、small-M、N tile 较多。
+- 语义：只增加 current-kernel `template_overhead_us`，不修改 `ideal_lower_bound_us`。
+
+本轮增量验证使用 `/tmp/ds32_matmul_quant_epilogue2.csv`：
+
+- ds3.2 large MatMul max：从 `0.689` 降到 `0.572`
+- ds3.2 `QuantBatchMatmulV3` large max：从 `0.689` 降到 `0.194`
+- ds3.2 `QuantBatchMatmulV3` large p95：从 `0.661` 降到 `0.174`
 - lower-bound violation：`0`
-- top tail：`duration=59.14us`，`estimated=18.419us`
-- diagnosis：`fallback_tiling|quant_matmul|weight_nz|small_m_overhead|low_cube_utilization|memory_bound`
 
 判断：
 
-- 这是当前最优先的 MatMul 建模差距。
-- 现有量化路径已经区分 low-bit storage、aux、dequant 和 quant peak，但 `QuantBatchMatmulV3` small-M / Weight-NZ / low cube utilization 组合仍明显低估。
-- 下一步应回到 `ops-nn/matmul/quant_batch_matmul_v3` 和公共 `common/cmct` 量化模板，检查 exact tiling、weight NZ、scale replay、fixpipe/dequant、低 tile 调度和 L2/L1 复用。
+- `QuantBatchMatmulV3` 不再是 ds3.2 large MatMul 第一残差。
+- 当前 ds3.2 large MatMul 第一残差转为 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`，max 约 `0.572`，属于 batched small-M transpose 路径的 current-kernel 模板/调度残留。
+- `full_quant_with_dequant` BF16 输出路径没有套用该项，因为大 K/N 路径原本已主要由 output/dequant/HBM 项覆盖，强行套用会导致高估。
 
 ## 2. base 910B4/910C MatMulV2 small-M
 
@@ -171,7 +175,7 @@ GMM 当前最大约 18% above-bound：
 
 ## 下一步优先级
 
-1. `QuantBatchMatmulV3` small-M / Weight-NZ / dequant 路径：从 `ops-nn/matmul/quant_batch_matmul_v3` 和 `common/cmct` 量化模板继续建模，重点看 scale/offset replay、fixpipe/dequant、L1/L0 copy 和低 tile 调度。
+1. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：从 transpose/batched small-M 模板和调度路径继续建模。
 2. base 910B4/910C `MatMulV2 M=1`：从 MatMulV2/MatMulCommon host tiling 与小 M/N policy 出发，区分平台和 kernel 模板，不复用 qwen 专用参数。
 3. gemma/base FIA decode：继续拆 `FusedInferAttentionScore` decode 模板、head_dim/kv_seq/mask/aux 和平台 latency floor。
 4. GMM：优先接入真实 `group_list` / `tuningConfigOptional`；缺失运行时数据时，只维护 routing bounds，不加无源码依据的校准项。

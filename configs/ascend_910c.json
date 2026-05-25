@@ -70,7 +70,25 @@
       "fake_quant_or_mixed": 2.0
     },
     "dequant_us_per_output_element": 0.0,
-    "scale_replay_factor": 1.0
+    "scale_replay_factor": 1.0,
+    "weight_nz_epilogue": {
+      "enabled": true,
+      "applies_to": [
+        "QuantBatchMatmulV3"
+      ],
+      "granularities": [
+        "per_channel_n"
+      ],
+      "compute_paths": [
+        "full_quant"
+      ],
+      "max_m_or_n": 4,
+      "min_n_tiles": 64,
+      "per_n_tile_us": 0.14,
+      "per_k_tile_us": 0.0,
+      "scale_bytes_per_n_tile": 128,
+      "notes": "arch35 QuantBatchMatmulV3 Weight-NZ per-channel path copies scale into L1 and emits Fixpipe tensor output by N tile with disableGemv=true; this term models current-kernel epilogue/sync overhead and does not modify ideal lower bound."
+    }
   },
   "calibration": {
     "launch_overhead_us_by_type": {

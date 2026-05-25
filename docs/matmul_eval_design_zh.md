@@ -352,6 +352,28 @@ template_overhead_us = aligned_flops / (effective_aligned_tflops * 1e6)
 
 它表达 current-kernel 小 M/N 路径仍可能承担 L1/L0 copy、MMAD/fixpipe、同步流水等成本，不改变 `ideal_lower_bound_us`。
 
+## QuantBatchMatmulV3 Weight-NZ epilogue 项
+
+`QuantBatchMatmulV3` 在 arch35 Weight-NZ、per-channel scale、small-M full-quant 路径上存在 current-kernel 模板开销。源码依据：
+
+- `ops-nn/matmul/quant_batch_matmul_v3/op_kernel/arch35/qbmm_cube_basic_api_cmct.h` 使用 `BlockMmadA8W8FixpipeQuant`。
+- `ops-nn/matmul/common/cmct/block/block_mmad_a8w8_fixpipe_quant.h` 中该路径设置 `disableGemv = true`。
+- per-channel scale 会按 N tile 执行 `CopyX2ScaleInL1`，并在 fixpipe 输出阶段消费 scale/quant 参数。
+- 该开销属于当前 kernel 的模板流水、event 同步和 epilogue 重放，不属于物理下界；因此只加到 `template_overhead_us`，不改变 `ideal_lower_bound_us`。
+
+配置入口：
+
+- `quant_matmul.weight_nz_epilogue.enabled`
+- `applies_to`：当前用于 `QuantBatchMatmulV3`
+- `granularities`：当前用于 `per_channel_n`
+- `compute_paths`：当前只用于 `full_quant`，避免影响已经由 dequant/output HBM 覆盖的大 BF16 输出路径
+- `max_m_or_n`、`min_n_tiles`：限制 small-M 且 N tile 足够多的 Weight-NZ 路径
+- `per_n_tile_us`：按 N tile 计入 scale/fixpipe/event epilogue 成本
+- `per_k_tile_us`：保留接口，当前 910C 配置为 0；K 循环主体仍由 compute/HBM 项表达
+- `scale_bytes_per_n_tile`：按 N tile 补充 scale GM->L1 的显式流量
+
+当前 910C 配置用于解释 ds3.2 `M=4,N=4096,K=7168,INT32 output` 的 full-quant Weight-NZ 低估；不会套到 `full_quant_with_dequant` BF16 输出路径。
+
 ## 报告字段
 
 resolved MatMul 报告包含：

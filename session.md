@@ -151,3 +151,31 @@
 - 后续除非用户另行说明，每完成一个新增特性/功能都需要本地提交
 - commit 信息格式使用 `[feat/doc/bugfix] xxxx`
 - 每轮修改后同步刷新 `session.md`
+
+## 2026-05-25 QuantBatchMatmulV3 Weight-NZ 建模
+
+本轮解决 ds3.2 910C `QuantBatchMatmulV3` small-M / Weight-NZ / full-quant 低估问题：
+
+- 新增 `quant_matmul.weight_nz_epilogue` 配置项，当前在 `configs/ascend_910c.json` 中开启。
+- `tools/matmul_eval/api.py` 将该项计入 current-kernel `template_overhead_us`，不改变 `ideal_lower_bound_us`。
+- 触发条件限制为 `QuantBatchMatmulV3`、B 为 `FRACTAL_NZ`、`per_channel_n`、`full_quant`、small-M、N tile 较多。
+- 源码依据来自 arch35 `BlockMmadA8W8FixpipeQuant`：per-channel scale 按 N tile 进入 L1，fixpipe 输出阶段消费 scale/quant 参数，且该路径 `disableGemv=true`。
+- 没有套用到 `full_quant_with_dequant` BF16 输出路径；验证显示该路径大 shape 原本主要由 output/dequant/HBM 覆盖，套用会高估。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind matmul --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --output /tmp/ds32_matmul_quant_epilogue2.csv --unresolved-output /tmp/ds32_matmul_quant_epilogue2_unresolved.csv`
+- `python3 tools/analyze_large_shape_gap.py /tmp/ds32_matmul_quant_epilogue2.csv /tmp/base910c_matmul_quant_epilogue.csv`
+
+结果：
+
+- ds3.2 `QuantBatchMatmulV3` large max：`0.689 -> 0.194`
+- ds3.2 `QuantBatchMatmulV3` large p95：`0.661 -> 0.174`
+- ds3.2 large MatMul 总体 max：`0.689 -> 0.572`
+- lower-bound violation：`0`
+
+新识别问题：
+
+- ds3.2 large MatMul 第一残差转为 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`，max 约 `0.572`。
+- base 910C `MatMulV2 M=1` large max 仍约 `0.542`，需要下一轮按 MatMulV2 small-M 模板继续处理。

@@ -145,6 +145,40 @@ def _small_m_matmul_v2_serial_us(
     return tile.aligned_flops / (effective_tflops * 1_000_000.0)
 
 
+def _quant_weight_nz_epilogue_us(
+    spec: MatmulSpec,
+    tile: TileEstimate,
+    quant_spec: QuantSpec | None,
+    config: dict[str, Any],
+    kernel_type: str,
+) -> float:
+    model = config.get("quant_matmul", {}).get("weight_nz_epilogue", {})
+    if not model.get("enabled", False):
+        return 0.0
+    if quant_spec is None or not quant_spec.is_quant:
+        return 0.0
+    if kernel_type not in set(model.get("applies_to", ["QuantBatchMatmulV3"])):
+        return 0.0
+    if spec.b_format != "FRACTAL_NZ":
+        return 0.0
+    if quant_spec.granularity not in set(model.get("granularities", ["per_channel_n"])):
+        return 0.0
+    if quant_spec.compute_path not in set(model.get("compute_paths", ["full_quant"])):
+        return 0.0
+    if min(spec.m, spec.n) > int(model.get("max_m_or_n", 4)):
+        return 0.0
+    min_n_tiles = int(model.get("min_n_tiles", 1))
+    if tile.tile_n < min_n_tiles:
+        return 0.0
+
+    per_n_tile_us = float(model.get("per_n_tile_us", 0.0))
+    per_k_tile_us = float(model.get("per_k_tile_us", 0.0))
+    scale_bytes_per_n_tile = int(model.get("scale_bytes_per_n_tile", tile.base_n * 8))
+    scale_replay_bytes = tile.tile_n * max(0, scale_bytes_per_n_tile)
+    scale_replay_us = scale_replay_bytes / max(float(config["hbm_bandwidth_tbps"]) * 1_000_000.0, 1e-9)
+    return tile.tile_n * per_n_tile_us + tile.tile_n * max(1, tile.tile_k) * per_k_tile_us + scale_replay_us
+
+
 def estimate_matmul_cost(
     spec: MatmulSpec,
     dtype: str,
@@ -229,6 +263,8 @@ def estimate_matmul_cost(
     template_overhead_us = 0.0
     if quant_spec is None or not quant_spec.is_quant:
         template_overhead_us = _small_m_matmul_v2_serial_us(spec, tile, resolved_config, kernel_type)
+    else:
+        template_overhead_us = _quant_weight_nz_epilogue_us(spec, tile, quant_spec, resolved_config, kernel_type)
 
     kernel_lower_bound_us = max(value for value in (flops_cost_us, memory_access_us) if value is not None)
     kernel_lower_bound_us += template_overhead_us
