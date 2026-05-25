@@ -14,7 +14,7 @@
 本仓库从昇腾 profiling CSV 中估计算子 kernel 耗时，并输出可解释的成本分量、tiling/source 来源、诊断标签和误差字段。设计目标不是对历史样本做黑盒拟合，而是基于以下信息建立 current-kernel 模型：
 
 - profiling CSV 可见 shape、dtype、format、duration、Block Dim 和硬件 counter
-- `ops-nn` / `ops-transformer` 中的 kernel、host tiling、模板和调度逻辑
+- `ops-nn` / `ops-transformer` / `ops-math` / `ops-cv` 中的 kernel、host tiling、模板和调度逻辑
 - `configs/` 中的平台核数、HBM 带宽、cache/buffer、峰值吞吐和全局 current-kernel 参数
 
 核心约束：
@@ -23,6 +23,82 @@
 - `ideal_lower_bound_us` 表示物理下界参考。
 - fallback 估计不能伪装成 actual tiling。
 - 新增参数必须能解释为 kernel、tiling 或硬件机制，不允许 per-shape 拟合。
+
+## 信息来源
+
+本仓库的评估模型来自 profiling 实测、CANN 开源算子实现、平台配置和历史基线。信息优先级如下：
+
+1. profiling CSV 中直接可见的运行时事实：`Type`、`Name`、shape、dtype、format、`Duration(us)`、`Block Dim`、AIC/AIV counter。
+2. CANN 开源仓库中的 host tiling、kernel 模板、调度策略、数据搬运和 workspace 逻辑。
+3. `configs/` 中的平台硬件参数和 current-kernel 全局参数。
+4. `eval_results/`、`example_profilings/` 和误差分析脚本产出的基线统计。
+
+当前主要源码来源：
+
+- CANN ops-nn：<https://gitcode.com/cann/ops-nn>
+- CANN ops-transformer：<https://gitcode.com/cann/ops-transformer>
+- CANN ops-math：<https://gitcode.com/cann/ops-math>
+- CANN ops-cv：<https://gitcode.com/cann/ops-cv>
+
+本地对应目录以当前仓库实际 checkout 为准：
+
+- `ops-nn`：MatMul、norm、activation、index/scatter、conv 等常规 NN kernel。
+- `ops-transformer-master`：Attention、QSFA、MoE、rope/routing 等 transformer kernel。
+- `ops-math`：elementwise、conversion、reduction、layout/memory 等 vector kernel。
+- `ops-cv`：resize、grid sample、ROI/NMS、CV 数据处理等 kernel。
+
+源码通常按以下链路读取：
+
+```text
+profiling Type/Name
+  -> source map
+  -> op_host / tiling
+  -> op_kernel / template / policy
+  -> 数据搬运、计算、同步、workspace 和 launch 成本
+```
+
+如果 profiling 缺少关键 runtime attrs，例如 `Transpose` permutation、`Slice` begin/size/stride、`Concat` axis、`Gather/Scatter` indices 或 GMM `group_list`，模型只能输出 fallback、bounds 或 unresolved，不能声明 exact replay。
+
+## 术语说明
+
+本节定义评估文档和 CSV 报告中的常用术语，避免把不同置信度的来源混为一类。
+
+- `kernel` / `current kernel`：profiling 中实际执行的 CANN kernel 路径。`estimated_us` 估计的是当前 kernel，而不是理想算法或另一个更优实现。
+- profiling CSV：昇腾 profiler 导出的 kernel 明细。它提供 shape、dtype、format、duration 和部分 counter，但通常不包含完整 attrs、真实输入值、runtime tiling data 或 workspace 内容。
+- tiling：host 侧根据 shape、dtype、format、平台和 attrs 选择 block、tile、core、L0/L1/UB、workspace、split 策略的过程。tiling 结果会决定 kernel 的数据搬运和计算路径。
+- replay：本仓库中的 replay 指“用 profiling 可见输入和开源源码逻辑复现或近似复现某类决策/成本路径”。它不是重新执行 kernel，也不等价于读取二进制运行时 tiling data；只有明确标为 exact 的来源才表示精确命中运行时知识或 tiling 数据。
+- exact host tiling replay：能够用 runtime KB、可见 tiling data 或确定性 host 逻辑精确还原当前执行 tiling。当前只有少量 MatMul 路径接近该语义。
+- `runtime_kb_exact`：MatMul 从 CANN runtime knowledge base 精确命中 tiling 记录，属于最高置信的 actual tiling 来源。
+- `advanced_tiling_heuristic`：MatMul 根据源码约束和平台规则构造的高级 tiling 启发式。它服务于 current-kernel 估计，但不是二进制 tiling replay。
+- `source_tiling_replay`：从开源源码还原 tiling 分支、关键常量或分块逻辑。它比纯 fallback 更接近 current kernel，但仍可能缺少 runtime attrs 或闭源二进制细节。
+- `source_strategy_replay`：只能识别源码策略标签或模板族，例如 layout 线性搬运、format transform、attention decode/prefill 策略。它不承诺 exact tiling data。
+- `ops_transformer_source_strategy_replay`：Attention 专用的 source strategy replay，表示命中 `ops-transformer` 中可见策略路径，但不是 exact host tiling replay。
+- `analytic_search`：当没有可用 runtime KB 或源码 tiling replay 时，根据 shape、dtype、平台资源搜索可解释的分块方案，属于 fallback tiling。
+- `analytic_fallback`：只有 shape/dtype/format 等基本信息时使用的物理可解释模型，常见于 other_ops 的低置信路径。
+- `fallback_tiling`：fallback 来源类别，表示模型未拿到 actual tiling。报告中不能把它解释成真实 kernel tiling。
+- `physical_lower_bound` / `ideal_lower_bound_us`：基于最小 FLOPs、最小 HBM 流量和硬件峰值估计的物理下界。它是参考下界，不是当前 kernel 预测值。
+- `current_kernel_bound_us`：在当前模型识别出的 kernel/tiling/source 约束下，扣除 launch 等固定项前的 body 下界。
+- `estimated_us` / `total_us`：当前 kernel 总耗时估计，是精度评估使用的主输出；`total_us` 与 `estimated_us` 保持一致。
+- `duration_us`：profiling 实测耗时。
+- `residual_us`：`duration_us - estimated_us`。
+- `duration_over_estimate`：`duration_us / estimated_us`。大于 1 表示低估，小于 1 表示高估。
+- `relative_error`：相对误差统计字段，通常用于 summary 的 max/p95/p90/median。
+- `source_repo` / `source_path`：模型对齐的源码仓库和目录，例如 `ops-math/conversion/transpose`。
+- `source_strategy`：源码策略标签，描述模型识别到的 kernel 逻辑路径，例如 `linear_ub_copy`、`reduce_tree`、`gather_random_read_missing_indices`。
+- `layout_pattern`：layout/memory 类算子的访问或转换模式，例如线性搬运、format transform、transpose、slice、多段 concat。
+- `missing_attrs`：profiling 不包含但 kernel 决策需要的 runtime attrs。出现该字段时，对应行必须降低置信度或转为 fallback/bounds/unresolved。
+- `confidence`：模型置信度。`low` 通常表示缺少 attrs、indices、routing、exact tiling 或源码只支持策略级识别。
+- `unresolved`：工具保留原始行和失败原因，但不输出 `estimated_us` 的记录。常见原因是 shape/dtype/format 为 `N/A`、Type 尚未支持或运行时语义不可恢复。
+- routing bounds：GMM 在缺少真实 `group_list` 时输出的路由耗时区间，通常包括 balanced routing 和 extreme imbalance 两端。
+- calibration：只允许用于暴露已有机制参数的建议，例如 MatMul 配置建议；不能作为 per-shape 拟合或无 kernel 机制来源的补丁。
+
+`xxx_replay` 后缀约定：
+
+- `*_exact`：精确命中 runtime KB、tiling data 或确定性 host tiling。
+- `*_tiling_replay`：从源码还原 tiling 分支或关键 tiling 参数，但不保证拿到二进制运行时 tiling data。
+- `*_strategy_replay`：只还原策略或模板标签，不还原 exact tiling。
+- `*_fallback`：源码或 attrs 不足时的解析/物理 fallback。
+- `*_lower_bound`：物理或当前 kernel 约束下界，不是预测值。
 
 ## 当前支持的算子族
 
@@ -211,13 +287,21 @@ CLI 参数在 `tools/op_eval/cli.py`：
 
 ## actual / fallback / optimal 语义
 
-所有算子族都必须区分三类语义：
+本节基于上文术语说明，定义所有算子族共享的来源置信度。`actual`、`fallback` 和 `optimal` 不是三个可互换的性能数字，而是三类不同信息来源。
+
+所有算子族都必须区分三类字段：
 
 ```text
 actual_tiling_source
 fallback_tiling_source
 optimal_tiling_source
 ```
+
+- `actual_tiling_source`：当前 kernel 路径的实际或近似实际来源。它可以是 `runtime_kb_exact` 这样的 exact 来源，也可以是源码约束下的 `advanced_tiling_heuristic` / `source_tiling_replay`。报告必须保留具体来源，不能只写笼统的 actual。
+- `fallback_tiling_source`：缺少 actual tiling 或关键 attrs 时使用的解析、搜索或物理 fallback 来源。它用于给出可解释估计，但不能被解释为运行时真实 tiling。
+- `optimal_tiling_source`：物理或理想下界来源，例如 `physical_lower_bound`。它只用于判断是否出现 lower-bound violation 或理解硬件极限，不参与伪装 current-kernel 预测。
+
+字段后缀含义沿用“术语说明”中的约定：`*_exact` 表示精确命中，`*_tiling_replay` 表示源码 tiling 级复现，`*_strategy_replay` 表示源码策略级复现，`*_fallback` 表示信息不足时的 fallback，`*_lower_bound` 表示下界而不是预测。
 
 ### MatMul
 

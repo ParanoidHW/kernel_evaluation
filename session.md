@@ -570,3 +570,12 @@ other_ops 专用 summary 结果：
   - `MemSet N/A`、`Gather/Scatter` 缺 indices、`Conv2D` 低置信 fallback、transformer/vector fusion unresolved 等限制。
 - `docs/architecture.md` 的算子族入口新增 Other Ops 设计文档链接，并将旧 TODO 改成当前已完成/剩余任务状态。
 - `README.md` 新增 Other Ops 设计文档入口和当前能力摘要。
+
+## 2026-05-25 架构术语与信息来源补充
+
+本轮按用户要求补充 `docs/architecture.md`：
+
+- 新增“信息来源”章节，明确 profiling CSV、CANN 开源仓库、平台配置和基线统计的优先级。
+- 补充 CANN 开源仓库链接：`ops-nn`、`ops-transformer`、`ops-math`、`ops-cv`，并记录本地对应目录和使用范围。
+- 新增“术语说明”章节，解释 `replay`、`runtime_kb_exact`、`source_tiling_replay`、`source_strategy_replay`、`ops_transformer_source_strategy_replay`、`analytic_fallback`、`physical_lower_bound`、`current_kernel_bound_us`、`estimated_us`、`missing_attrs`、`unresolved`、`routing bounds` 等概念。
+- 重写 `actual / fallback / optimal` 语义入口，明确 `actual_tiling_source` 不等于都具备 exact 二进制 replay，`fallback_tiling_source` 不能伪装成 actual tiling，`optimal_tiling_source` 只表示下界参考。
