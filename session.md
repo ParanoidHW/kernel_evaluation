@@ -179,3 +179,19 @@
 
 - ds3.2 large MatMul 第一残差转为 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`，max 约 `0.572`。
 - base 910C `MatMulV2 M=1` large max 仍约 `0.542`，需要下一轮按 MatMulV2 small-M 模板继续处理。
+
+## 2026-05-25 TransposeBatchMatMul 残差遗留
+
+根据用户判断，本轮将 ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128` 记为遗留，有条件再处理。
+
+已检查代码：
+
+- arch35 `transpose_batch_mat_mul` 根据 `PERM_X1/PERM_X2/BATCH_SPLIT` 选择 `BMM_TRANS` / `TRANS_BMM_TRANS` 等模板。
+- host tiling 解析 `perm_x1` 和 `perm_x2`，但当前 profiling CSV 不保留这些 attrs。
+- kernel 内没有看到独立的 transpose 临时连续化 DataCopy kernel；transpose 通过 `SetTensorA/B(..., isTrans)`、`SetOrgShape` 和 `CalcGMOffset()` 进入 MatmulImpl 装载路径。
+- ds3.2 样本硬件计数器显示 `aic_mte2_time`、`aic_fixpipe_time`、`aic_scalar_time` 明显高于 `aic_mac_time`，符合 transpose/strided 访问和输出布局处理开销。
+
+处理结论：
+
+- 不引入无关校准项或按单一 shape 拟合。
+- 该项从活动 TODO 降级为遗留，后续需要 perm attrs、exact tiling 或更细硬件计数器后再建模。

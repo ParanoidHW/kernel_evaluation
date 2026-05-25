@@ -109,7 +109,8 @@ GMM routing-bound 结果来自 `20260522T081103Z_0a7ccb1`：
 判断：
 
 - `QuantBatchMatmulV3` 不再是 ds3.2 large MatMul 第一残差。
-- 当前 ds3.2 large MatMul 第一残差转为 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`，max 约 `0.572`，属于 batched small-M transpose 路径的 current-kernel 模板/调度残留。
+- 当前 ds3.2 large MatMul 第一残差转为 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`，max 约 `0.572`。
+- 已检查源码：未发现独立的 transpose 临时连续化 DataCopy kernel；transpose 由 `perm_x1/perm_x2` 模板、`SetTensorA/B(..., isTrans)`、`SetOrgShape` 和 GM offset 计算进入 MatmulImpl 装载路径。profiling 中 MTE2/fixpipe/scalar 时间明显高于 MAC 时间，符合 strided/transpose 访问与输出布局处理开销。该项当前记为遗留，有条件获取 perm attrs 或 exact tiling 后再处理。
 - `full_quant_with_dequant` BF16 输出路径没有套用该项，因为大 K/N 路径原本已主要由 output/dequant/HBM 项覆盖，强行套用会导致高估。
 
 ## 2. base 910B4/910C MatMulV2 small-M
@@ -170,13 +171,13 @@ GMM 当前最大约 18% above-bound：
 
 - qwen3-7b/qwen7b 平台问题已解决：当前使用 `Ascend910B4-1`，HBM 1.6 TB/s，MatMul/Attention lower-bound violation 均为 0。
 - Attention 当前最大已知残留不再是 QSFA parser，而是 gemma/base 910B4 FIA decode 与 QSFA exact replay 深度不足。
-- MatMul 当前最大残留转向 ds3.2 `QuantBatchMatmulV3` 和 base `MatMulV2 M=1` small-M 路径。
+- MatMul 当前最大活动建模残留是 base `MatMulV2 M=1` small-M 路径；ds3.2 `TransposeBatchMatMul` transpose/strided 访问残差先作为遗留。
 - GMM 应继续使用 routing-bound 口径；没有真实 group runtime 数据前，不应按普通 MatMul 单点误差做结论。
 
 ## 下一步优先级
 
-1. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：从 transpose/batched small-M 模板和调度路径继续建模。
-2. base 910B4/910C `MatMulV2 M=1`：从 MatMulV2/MatMulCommon host tiling 与小 M/N policy 出发，区分平台和 kernel 模板，不复用 qwen 专用参数。
-3. gemma/base FIA decode：继续拆 `FusedInferAttentionScore` decode 模板、head_dim/kv_seq/mask/aux 和平台 latency floor。
-4. GMM：优先接入真实 `group_list` / `tuningConfigOptional`；缺失运行时数据时，只维护 routing bounds，不加无源码依据的校准项。
-5. QSFA：若能拿到 block table/sparse indices 或 exact tiling，再继续收敛 20% tail；否则作为 source-strategy replay residual 跟踪。
+1. base 910B4/910C `MatMulV2 M=1`：从 MatMulV2/MatMulCommon host tiling 与小 M/N policy 出发，区分平台和 kernel 模板，不复用 qwen 专用参数。
+2. gemma/base FIA decode：继续拆 `FusedInferAttentionScore` decode 模板、head_dim/kv_seq/mask/aux 和平台 latency floor。
+3. GMM：优先接入真实 `group_list` / `tuningConfigOptional`；缺失运行时数据时，只维护 routing bounds，不加无源码依据的校准项。
+4. QSFA：若能拿到 block table/sparse indices 或 exact tiling，再继续收敛 20% tail；否则作为 source-strategy replay residual 跟踪。
+5. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：当前按 transpose/strided 访问遗留跟踪；需要 perm attrs、exact tiling 或更细硬件计数器后再恢复建模。
