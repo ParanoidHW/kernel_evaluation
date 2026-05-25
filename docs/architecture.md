@@ -488,6 +488,7 @@ unresolved 至少保留原始 shape/dtype/format、缺失 attrs 和 source looku
 - `tools/other_ops_eval/common.py`：Type 分类、shape/dtype/format 解析、source map 和缺失 attrs 标记。
 - layout/memory source map 已细化到具体源码目录，例如 `ops-math/math/cast`、`ops-math/conversion/tensor_move`、`trans_data`、`transpose`、`slice`、`strided_slice`、`as_strided`、`concat`、`split`、`pack`。
 - layout/memory 报告新增 `source_strategy` 和 `layout_pattern`，区分 `linear_ub_cast`、`linear_ub_copy`、`format_transform_*_simt`、`transpose_nddma_vconv_missing_perm`、`slice_move_align_or_nddma_missing_offsets`、`as_strided_gather_or_move_align_missing_stride`、`concat_axis_strategy_missing_axis`、`pack_to_concat_missing_axis` 等源码策略。
+- elementwise/vector 已补充 `Cos`、`Sin`、`Equal`、`Greater`、`Tile` 等分类；`Cos/Sin/Pows/RealDiv` 等使用源码可解释的较高 vector op factor，`scalar/broadcast/fill` 路径通过 `source_strategy` 标记。
 - `tools/other_ops_eval/api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
 - `tools/other_ops_eval/evaluator.py`：profiling CSV 读取、resolved/unresolved 报告、summary 输出。
 - `tools/op_eval/api.py` / `tools/op_eval/cli.py`：注册 `op_kind=other_ops`。
@@ -507,7 +508,7 @@ python3 tools/eval_ops.py --op-kind other_ops \
 
 - resolved：`72016`
 - unresolved：`382`
-- 主要 unresolved：`RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`Tile`、`Cos`、`Sin` 等未纳入首轮分类的算子。
+- 主要 unresolved：`RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`MaskedSelectV3`、`Range`、`LinearIndex`、`ScatterElementsV2` 等未纳入首轮分类或缺少 shape/运行时语义的算子。
 - 当前模型是 fallback/source-strategy 级别，不是 exact tiling replay；layout/memory 已能按源码策略区分线性搬运、format transform、transpose、slice/as_strided、concat/pack 等路径。
 
 ### 后续实施任务

@@ -308,3 +308,40 @@
   - index_scatter_routing：`10.89`
   - reduction：`5.53`
 - top tail 仍集中在 `Pack/Slice/GatherV2/GatherV3`，原因分别是缺 `axis`、`begin/size/stride` 或 indices 实际值；当前保持 low confidence，不做拟合参数。
+
+## 2026-05-25 other_ops elementwise/vector 分类增强
+
+本轮继续处理第二优先级 elementwise/vector：
+
+- `tools/other_ops_eval/common.py` 新增或细化：
+  - `Cos/Sin/Equal/Greater` 纳入 elementwise/vector。
+  - `Tile/MemSet` 纳入 layout/memory，其中 `Tile` 按 broadcast-copy，`MemSet` 按 output fill；profiling 中 `MemSet` 为 `N/A` shape 时仍 unresolved。
+  - elementwise source map 补到 `ops-math/math/cos`、`sin`、`real_div`、`select_v2`、`ops-math/conversion/fill`、`zeros_like`、`clip_by_value_v2` 等具体目录。
+  - `source_strategy` 区分普通 vector、scalar broadcast、broadcast、fill、expensive math、transcendental vector pipeline。
+- `tools/other_ops_eval/api.py` 将 elementwise 从纯 analytic fallback 升为 source-strategy 级别，并按算子语义计 vector op factor：
+  - 普通 Add/Mul/Sub/Neg：`1`
+  - compare/select/clip：`2`
+  - RealDiv：`4`
+  - Cos/Sin：`transcendental_op_factor`
+  - Pows/Pow：不低于 transcendental factor
+  - fill/zeros/ones：`0.5`
+- `configs/ascend_910b4*.json`、`configs/ascend_910c.json` 新增平台级 `transcendental_op_factor=16.0`，对应 transcendental vector 指令/近似多步计算，不针对单个 shape 拟合。
+- `docs/architecture.md` 同步更新当前实现状态。
+
+验证：
+
+- `python3 -m compileall tools`
+- `python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C --config configs/ascend_910c.json --output /tmp/other_ops_910c_elementwise.csv --unresolved-output /tmp/other_ops_910c_elementwise_unresolved.csv`
+
+910C 结果：
+
+- resolved：`72054`，较上一轮 `72016` 增加 `38`
+- unresolved：`344`，较上一轮 `382` 减少 `38`
+- `Cos/Sin/Tile/Equal` 已被分类；`MemSet` 因 profiling shape 为 `N/A` 仍 unresolved。
+- 主要 unresolved 变为 `RotaryPositionEmbedding`、`MemSet`、`Conv2D`、`MaskedSelectV3`、`Range`、`LinearIndex`、`ScatterElementsV2`、`NonZero`、`GatherElements`。
+- family 中位 `duration_over_estimate` 基本保持：
+  - elementwise_vector：`0.77`
+  - layout_memory：`2.48`
+  - norm_activation：`1.10`
+  - index_scatter_routing：`10.89`
+  - reduction：`5.53`

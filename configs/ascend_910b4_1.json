@@ -90,6 +90,7 @@
     "reduction_passes": 2.0,
     "norm_passes": 3.0,
     "activation_op_factor": 4.0,
+    "transcendental_op_factor": 16.0,
     "index_random_access_factor": 1.5
   },
   "calibration": {

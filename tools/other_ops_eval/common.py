@@ -52,6 +52,8 @@ LAYOUT_MEMORY_TYPES = {
     "concatv2d",
     "splitvd",
     "pack",
+    "tile",
+    "memset",
 }
 
 ELEMENTWISE_TYPES = {
@@ -62,7 +64,9 @@ ELEMENTWISE_TYPES = {
     "realdiv",
     "pows",
     "greaterequal",
+    "greater",
     "less",
+    "equal",
     "zeroslike",
     "oneslike",
     "fill",
@@ -71,6 +75,8 @@ ELEMENTWISE_TYPES = {
     "broadcastto",
     "selectv2",
     "clipbyvaluev2",
+    "cos",
+    "sin",
 }
 
 REDUCTION_TYPES = {"reducesum", "reducesumd", "reducemean", "reduceall", "softmaxv2"}
@@ -177,10 +183,20 @@ LAYOUT_SOURCE_PATHS = {
     "concatv2d": "ops-math/conversion/concat",
     "splitvd": "ops-math/conversion/split",
     "pack": "ops-math/conversion/pack",
+    "tile": "ops-math/math/tile",
+    "memset": "ops-math/conversion/mem_set",
 }
 
 ELEMENTWISE_SOURCE_PATHS = {
     "broadcastto": "ops-math/conversion/broadcast_to",
+    "clipbyvaluev2": "ops-math/conversion/clip_by_value_v2",
+    "fill": "ops-math/conversion/fill",
+    "zeroslike": "ops-math/conversion/zeros_like",
+    "oneslike": "ops-math/math/ones_like",
+    "realdiv": "ops-math/math/real_div",
+    "selectv2": "ops-math/math/select_v2",
+    "cos": "ops-math/math/cos",
+    "sin": "ops-math/math/sin",
 }
 
 
@@ -232,7 +248,15 @@ def build_spec(
     if logical_elements == 0:
         logical_elements = max(input_elements or [0], default=0)
     missing_attrs = infer_missing_attrs(op_type, family)
-    source_strategy = infer_source_strategy(op_type, family, input_formats, output_formats, missing_attrs)
+    source_strategy = infer_source_strategy(
+        op_type,
+        family,
+        input_elements,
+        logical_elements,
+        input_formats,
+        output_formats,
+        missing_attrs,
+    )
     layout_pattern = infer_layout_pattern(op_type, family, input_shapes, output_shapes, input_formats, output_formats)
     return OtherOpSpec(
         op_type=op_type,
@@ -265,6 +289,10 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
         missing.extend(["begin", "size_or_end", "stride"])
     if normalized in {"concatd", "concatv2d", "splitvd", "pack"}:
         missing.append("axis")
+    if normalized == "tile":
+        missing.append("multiples")
+    if normalized == "memset":
+        missing.append("fill_value")
     if normalized == "asstrided":
         missing.extend(["size", "stride", "storage_offset"])
     if family == "index_scatter_routing":
@@ -275,6 +303,8 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
 def infer_source_strategy(
     op_type: str,
     family: str,
+    input_elements: list[int],
+    logical_elements: int,
     input_formats: list[str],
     output_formats: list[str],
     missing_attrs: str,
@@ -304,7 +334,21 @@ def infer_source_strategy(
             return "split_axis_strategy_missing_axis" if missing_attrs else "split_axis_strategy"
         if normalized == "pack":
             return "pack_to_concat_missing_axis" if missing_attrs else "pack_to_concat"
+        if normalized == "tile":
+            return "tile_broadcast_copy_missing_multiples" if missing_attrs else "tile_broadcast_copy"
+        if normalized == "memset":
+            return "memset_output_fill"
     if family == "elementwise_vector":
+        if normalized in {"cos", "sin", "sigmoid"}:
+            return "elementwise_transcendental_vector_pipeline"
+        if normalized in {"pows", "pow", "realdiv"}:
+            return "elementwise_expensive_math_vector_pipeline"
+        if normalized in {"zeroslike", "oneslike", "fill"}:
+            return "elementwise_fill_vector_pipeline"
+        if input_elements and any(elems == 1 for elems in input_elements) and logical_elements > 1:
+            return "elementwise_scalar_broadcast_vector_pipeline"
+        if input_elements and any(elems not in {1, logical_elements} for elems in input_elements):
+            return "elementwise_broadcast_vector_pipeline"
         return "elementwise_vector_pipeline"
     if family == "reduction":
         return "reduction_vector_pipeline"
@@ -338,6 +382,10 @@ def infer_layout_pattern(
         return "strided_region"
     if normalized in {"concatd", "concatv2d", "splitvd", "pack"}:
         return "axis_segment"
+    if normalized == "tile":
+        return "broadcast_tile"
+    if normalized == "memset":
+        return "output_fill"
     if input_shapes and output_shapes and input_shapes[0] == output_shapes[0]:
         return "shape_preserve"
     return "layout_transform"

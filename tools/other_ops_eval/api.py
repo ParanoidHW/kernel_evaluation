@@ -31,6 +31,7 @@ def _other_ops_config(config: dict[str, Any]) -> dict[str, Any]:
         "reduction_passes": float(model.get("reduction_passes", 2.0)),
         "norm_passes": float(model.get("norm_passes", 3.0)),
         "activation_op_factor": float(model.get("activation_op_factor", 4.0)),
+        "transcendental_op_factor": float(model.get("transcendental_op_factor", 16.0)),
         "index_random_access_factor": float(model.get("index_random_access_factor", 1.5)),
     }
 
@@ -51,6 +52,23 @@ def _is_activation_only(op_type: str) -> bool:
         "gegluv2",
         "dequantswigluquant",
     }
+
+
+def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
+    normalized = spec.op_type.replace("_", "").replace("-", "").lower()
+    if normalized in {"zeroslike", "oneslike", "fill"}:
+        return 0.5
+    if normalized in {"cos", "sin"}:
+        return cfg["transcendental_op_factor"]
+    if normalized in {"sigmoid"}:
+        return cfg["activation_op_factor"]
+    if normalized in {"pows", "pow"}:
+        return max(cfg["transcendental_op_factor"], 8.0)
+    if normalized in {"realdiv"}:
+        return 4.0
+    if normalized in {"greaterequal", "greater", "less", "equal", "selectv2", "clipbyvaluev2"}:
+        return 2.0
+    return 1.0
 
 
 def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostEstimate:
@@ -82,8 +100,8 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
         if spec.missing_attrs:
             layout_overhead_us = _bytes_to_us(traffic_bytes * (cfg["layout_strided_factor"] - 1.0), hbm_bandwidth)
     elif spec.op_family == "elementwise_vector":
-        tiling_source = "analytic_fallback"
-        vector_ops = float(spec.logical_elements)
+        tiling_source = "source_strategy_replay"
+        vector_ops = float(spec.logical_elements) * _elementwise_op_factor(spec, cfg)
     elif spec.op_family == "reduction":
         tiling_source = "analytic_fallback"
         traffic_bytes = input_bytes + output_bytes * cfg["reduction_passes"]
