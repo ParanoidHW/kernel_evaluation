@@ -123,8 +123,15 @@ base 910B4/910C MatMul 的 top gap 都是 `MatMulV2 M=1` 类 small-M 路径：
 
 判断：
 
-- qwen 专用 `910B4-1` small-M/N MatMulV2 已收敛，但该参数不应直接外推到 base 910B4/910C。
-- base MatMulV2 small-M 仍需要从 MatMulV2/MatMulCommon 源码和 host tiling 路径继续建模。
+- 源码上有可解释机制：公共 MatMul 路径存在 `MatmulToMul` policy，checked block MMAD 路径也存在 `disableGemv`、L1/L0 copy 与 sync 流水开销。
+- 当前 profiling 有 shape、dtype、format、block dim 和硬件计数器，但没有 MatMulV2 exact host tiling 输出、实际模板 key、L1/L0 分块细节或 runtime KB 命中记录。
+- 910B4 仍存在 1 个 lower-bound violation，在 parser/traffic 未单独解释前，不应继续调高 current-kernel 项。
+- qwen 专用 `910B4-1` small-M/N MatMulV2 已收敛，但该配置包含 qwen 平台/样本下的有效流水项，不能直接外推到 base 910B4/910C。
+
+处理结论：
+
+- 当前信息不足以在 base 910B4/910C 上继续完成可解释建模；若按 top tail 反推 `effective_aligned_tflops`，会变成按数据拟合。
+- 降级为遗留。后续需要 MatMulV2 exact tiling/template key、可靠 lower-bound violation 解释，或平台级 small-M 模板基准后再恢复。
 
 ## 3. gemma Attention FIA decode
 
@@ -138,8 +145,13 @@ gemma 910B4 Attention：
 判断：
 
 - 这是 910B4 FIA decode/source-strategy replay 的残留。
-- qwen 专用 floor 已收敛 qwen，但 gemma 不应直接套 qwen floor。
-- 需要按 FIA decode 模板、head_dim、kv_seq、mask/aux 和平台 launch/latency floor 继续拆分。
+- qwen 专用 floor 已收敛 qwen，但 gemma/base decode 不能直接套 qwen floor。
+- 当前 attention evaluator 是 source-strategy replay，不是 exact host tiling replay；profiling 中也没有 FIA tiling data、模板 key、mask/aux 实际访问规模和 decode cache/block 元数据。
+
+处理结论：
+
+- 当前信息不足以继续完成 gemma/base FIA decode 可解释建模；继续调 latency floor 会变成样本拟合。
+- 降级为遗留。后续需要 FIA exact tiling、decode 模板 key、KV cache/block metadata 或更完整的 mask/aux 运行时信息。
 
 ## 4. ds3.2 KvQuantSparseFlashAttention
 
@@ -155,6 +167,11 @@ QSFA 已从旧基线的严重错误收敛到：
 - 当前已经不是普通 attention parser 错误。
 - 剩余 tail 属于 QSFA source-strategy replay residual，需要真实 block table、sparse indices、topK/PA workspace 访问次数或 exact tiling 才能继续收敛。
 
+处理结论：
+
+- 当前缺少 block table 实际值、sparse indices、runtime topK 行为和 exact host tiling。
+- 降级为遗留。现有模型保持 source-strategy replay，不继续添加无运行时输入支撑的稀疏访问校准项。
+
 ## 5. GMM above-bound residual
 
 GMM 当前最大约 18% above-bound：
@@ -165,19 +182,26 @@ GMM 当前最大约 18% above-bound：
 判断：
 
 - 不能通过扩大经验区间或调高 scheduler_us 来“拟合”。
-- 下一步需要真实 `group_list`、`groupListType`、`tuningConfigOptional`，或继续拆 arch35 quant/weight-quant/adaptive sliding window/tail split。
+- 当前 profiling 缺少真实 `group_list`、`groupListType`、`tuningConfigOptional` 和 per-expert token 分布；这些字段决定实际活跃专家数、group 间调度和 tail split。
+
+处理结论：
+
+- 当前信息不足以把 routing bounds 收敛为单次执行估计，也不能为 above-bound 样本继续加宽区间。
+- 降级为遗留。后续需要真实 routing/tuning 输入或 exact tiling 输出后再恢复。
 
 ## 当前结论
 
 - qwen3-7b/qwen7b 平台问题已解决：当前使用 `Ascend910B4-1`，HBM 1.6 TB/s，MatMul/Attention lower-bound violation 均为 0。
 - Attention 当前最大已知残留不再是 QSFA parser，而是 gemma/base 910B4 FIA decode 与 QSFA exact replay 深度不足。
-- MatMul 当前最大活动建模残留是 base `MatMulV2 M=1` small-M 路径；ds3.2 `TransposeBatchMatMul` transpose/strided 访问残差先作为遗留。
+- MatMul 当前已无具备足够信息支撑继续完成的活动 TODO；base `MatMulV2 M=1` 和 ds3.2 `TransposeBatchMatMul` 均已降级为遗留。
 - GMM 应继续使用 routing-bound 口径；没有真实 group runtime 数据前，不应按普通 MatMul 单点误差做结论。
 
-## 下一步优先级
+## 遗留清单
 
-1. base 910B4/910C `MatMulV2 M=1`：从 MatMulV2/MatMulCommon host tiling 与小 M/N policy 出发，区分平台和 kernel 模板，不复用 qwen 专用参数。
-2. gemma/base FIA decode：继续拆 `FusedInferAttentionScore` decode 模板、head_dim/kv_seq/mask/aux 和平台 latency floor。
-3. GMM：优先接入真实 `group_list` / `tuningConfigOptional`；缺失运行时数据时，只维护 routing bounds，不加无源码依据的校准项。
-4. QSFA：若能拿到 block table/sparse indices 或 exact tiling，再继续收敛 20% tail；否则作为 source-strategy replay residual 跟踪。
-5. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：当前按 transpose/strided 访问遗留跟踪；需要 perm attrs、exact tiling 或更细硬件计数器后再恢复建模。
+1. base 910B4/910C `MatMulV2 M=1`：需要 MatMulV2 exact tiling/template key、可靠 lower-bound violation 解释，或平台级 small-M 模板基准。
+2. gemma/base FIA decode：需要 FIA exact tiling、decode 模板 key、KV cache/block metadata 或 mask/aux 运行时信息。
+3. GMM above-bound：需要真实 `group_list`、`groupListType`、`tuningConfigOptional`、per-expert token 分布或 exact tiling 输出。
+4. QSFA exact replay：需要 block table 实际值、sparse indices、runtime topK 行为或 exact host tiling。
+5. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：需要 perm attrs、exact tiling 或更细硬件计数器后再恢复建模。
+
+在上述输入补齐前，当前不再维护活动建模 TODO，避免为了拟合个别残差引入无关旋钮。

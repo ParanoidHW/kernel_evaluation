@@ -195,3 +195,22 @@
 
 - 不引入无关校准项或按单一 shape 拟合。
 - 该项从活动 TODO 降级为遗留，后续需要 perm attrs、exact tiling 或更细硬件计数器后再建模。
+
+## 2026-05-25 剩余 TODO 支撑信息审计
+
+本轮按 review/iteration 口径检查剩余 TODO 是否具备继续完成的必要信息。
+
+结论：
+
+- base 910B4/910C `MatMulV2 M=1`：源码有 `MatmulToMul` policy、`disableGemv`、L1/L0 copy 与 sync 流水等机制线索；但当前 profiling 缺 MatMulV2 exact host tiling、模板 key、L1/L0 分块细节或 runtime KB 命中记录，且 910B4 仍有 1 个 lower-bound violation 未单独解释。若继续按 tail 反推有效吞吐，会变成样本拟合。降级为遗留。
+- gemma/base FIA decode：当前 attention evaluator 是 source-strategy replay，不是 exact host tiling replay；profiling 缺 FIA tiling data、decode 模板 key、KV cache/block metadata 和 mask/aux 实际访问规模。继续调 floor 会变成样本拟合。降级为遗留。
+- GMM above-bound：profiling 缺真实 `group_list`、`groupListType`、`tuningConfigOptional` 和 per-expert token 分布，无法把 routing bounds 收敛为单次执行估计，也不能为了 above-bound 样本扩大区间。降级为遗留。
+- QSFA exact replay：当前缺 block table 实际值、sparse indices、runtime topK 行为和 exact host tiling。现有模型保持 source-strategy replay，不继续添加无运行时输入支撑的稀疏访问校准项。降级为遗留。
+- ds3.2 `TransposeBatchMatMul` 已在上一节按 transpose/strided 访问残差降级为遗留。
+
+当前状态：
+
+- qwen3-7b/qwen7b 平台和 910B4-1 配置问题已解决。
+- ds3.2 `QuantBatchMatmulV3` Weight-NZ/full-quant 已完成一轮可解释建模。
+- 剩余残差在现有 profiling/source 信息下均不具备继续完成的充分支撑，全部转入遗留清单。
+- 后续若补齐 exact tiling、runtime metadata 或平台级模板基准，再恢复对应项。
