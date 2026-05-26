@@ -63,42 +63,63 @@ profiling Type/Name
 
 本节定义评估文档和 CSV 报告中的常用术语，避免把不同置信度的来源混为一类。
 
-- `kernel` / `current kernel`：profiling 中实际执行的 CANN kernel 路径。`estimated_us` 估计的是当前 kernel，而不是理想算法或另一个更优实现。
-- profiling CSV：昇腾 profiler 导出的 kernel 明细。它提供 shape、dtype、format、duration 和部分 counter，但通常不包含完整 attrs、真实输入值、runtime tiling data 或 workspace 内容。
-- tiling：host 侧根据 shape、dtype、format、平台和 attrs 选择 block、tile、core、L0/L1/UB、workspace、split 策略的过程。tiling 结果会决定 kernel 的数据搬运和计算路径。
-- replay：本仓库中的 replay 指“用 profiling 可见输入和开源源码逻辑复现或近似复现某类决策/成本路径”。它不是重新执行 kernel，也不等价于读取二进制运行时 tiling data；只有明确标为 exact 的来源才表示精确命中运行时知识或 tiling 数据。
-- exact host tiling replay：能够用 runtime KB、可见 tiling data 或确定性 host 逻辑精确还原当前执行 tiling。当前只有少量 MatMul 路径接近该语义。
-- `runtime_kb_exact`：MatMul 从 CANN runtime knowledge base 精确命中 tiling 记录，属于最高置信的 actual tiling 来源。
-- `advanced_tiling_heuristic`：MatMul 根据源码约束和平台规则构造的高级 tiling 启发式。它服务于 current-kernel 估计，但不是二进制 tiling replay。
-- `source_tiling_replay`：从开源源码还原 tiling 分支、关键常量或分块逻辑。它比纯 fallback 更接近 current kernel，但仍可能缺少 runtime attrs 或闭源二进制细节。
-- `source_strategy_replay`：只能识别源码策略标签或模板族，例如 layout 线性搬运、format transform、attention decode/prefill 策略。它不承诺 exact tiling data。
-- `ops_transformer_source_strategy_replay`：Attention 专用的 source strategy replay，表示命中 `ops-transformer` 中可见策略路径，但不是 exact host tiling replay。
-- `analytic_search`：当没有可用 runtime KB 或源码 tiling replay 时，根据 shape、dtype、平台资源搜索可解释的分块方案，属于 fallback tiling。
-- `analytic_fallback`：只有 shape/dtype/format 等基本信息时使用的物理可解释模型，常见于 other_ops 的低置信路径。
-- `fallback_tiling`：fallback 来源类别，表示模型未拿到 actual tiling。报告中不能把它解释成真实 kernel tiling。
-- `physical_lower_bound` / `ideal_lower_bound_us`：基于最小 FLOPs、最小 HBM 流量和硬件峰值估计的物理下界。它是参考下界，不是当前 kernel 预测值。
-- `current_kernel_bound_us`：在当前模型识别出的 kernel/tiling/source 约束下，扣除 launch 等固定项前的 body 下界。
-- `estimated_us` / `total_us`：当前 kernel 总耗时估计，是精度评估使用的主输出；`total_us` 与 `estimated_us` 保持一致。
-- `duration_us`：profiling 实测耗时。
-- `residual_us`：`duration_us - estimated_us`。
-- `duration_over_estimate`：`duration_us / estimated_us`。大于 1 表示低估，小于 1 表示高估。
-- `relative_error`：相对误差统计字段，通常用于 summary 的 max/p95/p90/median。
-- `source_repo` / `source_path`：模型对齐的源码仓库和目录，例如 `ops-math/conversion/transpose`。
-- `source_strategy`：源码策略标签，描述模型识别到的 kernel 逻辑路径，例如 `linear_ub_copy`、`reduce_tree`、`gather_random_read_missing_indices`。
-- `layout_pattern`：layout/memory 类算子的访问或转换模式，例如线性搬运、format transform、transpose、slice、多段 concat。
-- `missing_attrs`：profiling 不包含但 kernel 决策需要的 runtime attrs。出现该字段时，对应行必须降低置信度或转为 fallback/bounds/unresolved。
-- `confidence`：模型置信度。`low` 通常表示缺少 attrs、indices、routing、exact tiling 或源码只支持策略级识别。
-- `unresolved`：工具保留原始行和失败原因，但不输出 `estimated_us` 的记录。常见原因是 shape/dtype/format 为 `N/A`、Type 尚未支持或运行时语义不可恢复。
-- routing bounds：GMM 在缺少真实 `group_list` 时输出的路由耗时区间，通常包括 balanced routing 和 extreme imbalance 两端。
-- calibration：只允许用于暴露已有机制参数的建议，例如 MatMul 配置建议；不能作为 per-shape 拟合或无 kernel 机制来源的补丁。
+### 核心概念
+
+| 术语 | 含义 |
+| --- | --- |
+| `kernel` / `current kernel` | profiling 中实际执行的 CANN kernel 路径。`estimated_us` 估计的是当前 kernel，而不是理想算法或另一个更优实现。 |
+| profiling CSV | 昇腾 profiler 导出的 kernel 明细。它提供 shape、dtype、format、duration 和部分 counter，但通常不包含完整 attrs、真实输入值、runtime tiling data 或 workspace 内容。 |
+| tiling | host 侧根据 shape、dtype、format、平台和 attrs 选择 block、tile、core、L0/L1/UB、workspace、split 策略的过程。tiling 结果会决定 kernel 的数据搬运和计算路径。 |
+| replay | 本仓库中的 replay 指“用 profiling 可见输入和开源源码逻辑复现或近似复现某类决策/成本路径”。它不是重新执行 kernel，也不等价于读取二进制运行时 tiling data；只有明确标为 exact 的来源才表示精确命中运行时知识或 tiling 数据。 |
+| exact host tiling replay | 能够用 runtime KB、可见 tiling data 或确定性 host 逻辑精确还原当前执行 tiling。当前只有少量 MatMul 路径接近该语义。 |
+
+### 来源与 Replay
+
+| 术语 | 含义 |
+| --- | --- |
+| `runtime_kb_exact` | MatMul 从 CANN runtime knowledge base 精确命中 tiling 记录，属于最高置信的 actual tiling 来源。 |
+| `advanced_tiling_heuristic` | MatMul 根据源码约束和平台规则构造的高级 tiling 启发式。它服务于 current-kernel 估计，但不是二进制 tiling replay。 |
+| `source_tiling_replay` | 从开源源码还原 tiling 分支、关键常量或分块逻辑。它比纯 fallback 更接近 current kernel，但仍可能缺少 runtime attrs 或闭源二进制细节。 |
+| `source_strategy_replay` | 只能识别源码策略标签或模板族，例如 layout 线性搬运、format transform、attention decode/prefill 策略。它不承诺 exact tiling data。 |
+| `ops_transformer_source_strategy_replay` | Attention 专用的 source strategy replay，表示命中 `ops-transformer` 中可见策略路径，但不是 exact host tiling replay。 |
+| `analytic_search` | 当没有可用 runtime KB 或源码 tiling replay 时，根据 shape、dtype、平台资源搜索可解释的分块方案，属于 fallback tiling。 |
+| `analytic_fallback` | 只有 shape/dtype/format 等基本信息时使用的物理可解释模型，常见于 other_ops 的低置信路径。 |
+| `fallback_tiling` | fallback 来源类别，表示模型未拿到 actual tiling。报告中不能把它解释成真实 kernel tiling。 |
+| `source_repo` / `source_path` | 模型对齐的源码仓库和目录，例如 `ops-math/conversion/transpose`。 |
+| `source_strategy` | 源码策略标签，描述模型识别到的 kernel 逻辑路径，例如 `linear_ub_copy`、`reduce_tree`、`gather_random_read_missing_indices`。 |
+| `layout_pattern` | layout/memory 类算子的访问或转换模式，例如线性搬运、format transform、transpose、slice、多段 concat。 |
+
+### 结果与误差字段
+
+| 术语 | 含义 |
+| --- | --- |
+| `physical_lower_bound` / `ideal_lower_bound_us` | 基于最小 FLOPs、最小 HBM 流量和硬件峰值估计的物理下界。它是参考下界，不是当前 kernel 预测值。 |
+| `current_kernel_bound_us` | 在当前模型识别出的 kernel/tiling/source 约束下，扣除 launch 等固定项前的 body 下界。 |
+| `estimated_us` / `total_us` | 当前 kernel 总耗时估计，是精度评估使用的主输出；`total_us` 与 `estimated_us` 保持一致。 |
+| `duration_us` | profiling 实测耗时。 |
+| `residual_us` | `duration_us - estimated_us`。 |
+| `duration_over_estimate` | `duration_us / estimated_us`。大于 1 表示低估，小于 1 表示高估。 |
+| `relative_error` | 相对误差统计字段，通常用于 summary 的 max/p95/p90/median。 |
+| routing bounds | GMM 在缺少真实 `group_list` 时输出的路由耗时区间，通常包括 balanced routing 和 extreme imbalance 两端。 |
+
+### 诊断与限制
+
+| 术语 | 含义 |
+| --- | --- |
+| `missing_attrs` | profiling 不包含但 kernel 决策需要的 runtime attrs。出现该字段时，对应行必须降低置信度或转为 fallback/bounds/unresolved。 |
+| `confidence` | 模型置信度。`low` 通常表示缺少 attrs、indices、routing、exact tiling 或源码只支持策略级识别。 |
+| `unresolved` | 工具保留原始行和失败原因，但不输出 `estimated_us` 的记录。常见原因是 shape/dtype/format 为 `N/A`、Type 尚未支持或运行时语义不可恢复。 |
+| calibration | 只允许用于暴露已有机制参数的建议，例如 MatMul 配置建议；不能作为 per-shape 拟合或无 kernel 机制来源的补丁。 |
 
 `xxx_replay` 后缀约定：
 
-- `*_exact`：精确命中 runtime KB、tiling data 或确定性 host tiling。
-- `*_tiling_replay`：从源码还原 tiling 分支或关键 tiling 参数，但不保证拿到二进制运行时 tiling data。
-- `*_strategy_replay`：只还原策略或模板标签，不还原 exact tiling。
-- `*_fallback`：源码或 attrs 不足时的解析/物理 fallback。
-- `*_lower_bound`：物理或当前 kernel 约束下界，不是预测值。
+| 后缀 | 含义 |
+| --- | --- |
+| `*_exact` | 精确命中 runtime KB、tiling data 或确定性 host tiling。 |
+| `*_tiling_replay` | 从源码还原 tiling 分支或关键 tiling 参数，但不保证拿到二进制运行时 tiling data。 |
+| `*_strategy_replay` | 只还原策略或模板标签，不还原 exact tiling。 |
+| `*_fallback` | 源码或 attrs 不足时的解析/物理 fallback。 |
+| `*_lower_bound` | 物理或当前 kernel 约束下界，不是预测值。 |
 
 ## 当前支持的算子族
 

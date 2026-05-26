@@ -579,3 +579,11 @@ other_ops 专用 summary 结果：
 - 补充 CANN 开源仓库链接：`ops-nn`、`ops-transformer`、`ops-math`、`ops-cv`，并记录本地对应目录和使用范围。
 - 新增“术语说明”章节，解释 `replay`、`runtime_kb_exact`、`source_tiling_replay`、`source_strategy_replay`、`ops_transformer_source_strategy_replay`、`analytic_fallback`、`physical_lower_bound`、`current_kernel_bound_us`、`estimated_us`、`missing_attrs`、`unresolved`、`routing bounds` 等概念。
 - 重写 `actual / fallback / optimal` 语义入口，明确 `actual_tiling_source` 不等于都具备 exact 二进制 replay，`fallback_tiling_source` 不能伪装成 actual tiling，`optimal_tiling_source` 只表示下界参考。
+
+## 2026-05-26 架构术语表格重组
+
+本轮继续整理 `docs/architecture.md` 的“术语说明”：
+
+- 将原先单一术语大表拆为四组：`核心概念`、`来源与 Replay`、`结果与误差字段`、`诊断与限制`。
+- 保留 `xxx_replay` 后缀约定为独立表格，避免和正文术语混排。
+- 术语语义保持不变，仅优化阅读结构，便于按问题类型快速查找。
