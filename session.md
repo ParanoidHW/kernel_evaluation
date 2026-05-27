@@ -508,14 +508,14 @@
   - p90：`0.6534`
   - median：`0.3158`
 - 该全量结果混合 910B4、910C、longcat 等不同平台，却统一使用 `ascend_910c.json`，只能作为 Type 覆盖和 tail 发现，不作为严格精度基线。
-- 全量主要 unresolved：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MoeComputeExpertTokens`、`MemSet`、`MlaPrologV3`、`LightningIndexerQuant`、`PadV3`、`Sort`、`InterleaveRope`、`KvRmsNormRopeCache`。
+- 全量主要 unresolved：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MoeComputeExpertTokens`、`MemSet`、`MlaPrologV3`、`LightningIndexerQuant`、`PadV3`、`Sort`、`InterleaveRope`、`KvRmsNormRopeCache`。其中 `AutomaticBufferFusionOp` 后续确认应作为非固定 pattern 融合包装忽略项。
 
 新问题和建议措施：
 
 - `MemSet N/A`：profiling 缺 shape/dtype/format，当前无法估计 output bytes。需要 profiling 导出补齐规格，或从相邻 `TransData/Conv` fusion 上下文解析 memset buffer 大小。
 - `Pack/Slice/Gather` overestimate：都属于缺 axis/offset/indices 的低置信路径。后续需要 profiling attrs、host tiling data 或运行时输入摘要；不应通过降低 HBM 带宽或随机访问因子拟合。
 - `Conv2D`：已分类为 `cv_regular`，但当前只是 fallback。后续应按 `ops-nn/conv/conv2d_v2` tiling、Cube FLOPs、NC1HWC0/FRACTAL_Z storage、L0/L1/BT 和 bias/scale/fixpipe 路径单独建模。
-- 全量 unresolved 的 `AutomaticBufferFusionOp/DynamicQuant/Rsqrt/RotaryMul/InterleaveRope/KvRmsNormRopeCache/MlaPrologV3` 需要新一轮按 transformer/vector fusion 类设计，不应混入本轮 basic other_ops fallback。
+- 全量 unresolved 的 `DynamicQuant/Rsqrt/RotaryMul/InterleaveRope/KvRmsNormRopeCache/MlaPrologV3` 需要新一轮按 transformer/vector fusion 类设计，不应混入本轮 basic other_ops fallback。`AutomaticBufferFusionOp` 不再列为待建模项。
 
 ## 2026-05-25 eval_results other_ops 快照刷新
 
@@ -545,7 +545,7 @@ other_ops 专用 summary 结果：
 - 910B4：rows `9285`，unresolved `923`，rel max `639.020`，p95 `2.234`，median `0.533`。top tail 为缺 indices 的 `GatherV2`。
 - 910C：rows `72364`，unresolved `34`，rel max `5.710`，p95 `0.554`，median `0.299`。top tail 为缺 axis 的 `Pack`，unresolved 仅 `MemSet`。
 - ds3.2：rows `2980`，unresolved `870`，rel max `16.635`，p95 `1.476`，median `0.614`。主要 unresolved 为 `DynamicQuant/RotaryMul/MlaPrologV3/LightningIndexerQuant`。
-- gemma：rows `2820`，unresolved `555`，rel max `47.205`，p95 `3.729`，median `0.521`。主要 unresolved 为 `AutomaticBufferFusionOp/RotaryMul/MoeComputeExpertTokens`。
+- gemma：rows `2820`，unresolved `555`，rel max `47.205`，p95 `3.729`，median `0.521`。主要 unresolved 为 `AutomaticBufferFusionOp/RotaryMul/MoeComputeExpertTokens`，其中 `AutomaticBufferFusionOp` 后续按忽略项处理。
 - longcat：rows `640`，unresolved `101`，rel max `666.847`，p95 `0.961`，median `0.465`。主要 unresolved 为 `InterleaveRope/KvRmsNormRopeCache`。
 - qwen7b 910B4-1：rows `3882`，unresolved `195`，rel max `148.856`，p95 `0.857`，median `0.329`。主要 unresolved 为 `Rsqrt`。
 
@@ -553,7 +553,7 @@ other_ops 专用 summary 结果：
 
 - 基础 910C other_ops 覆盖已经较完整；剩余 `MemSet` 需要 profiling 补规格或上下文解析。
 - 910B4/模型样本最大误差主要来自 `GatherV2/GatherV3` 缺 indices，当前为低置信 fallback，不能用随机访问因子拟合。
-- 下一轮优先处理 transformer/vector fusion 类 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`AutomaticBufferFusionOp`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens`。
+- 下一轮优先处理 transformer/vector fusion 类 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens`。`AutomaticBufferFusionOp` 不进入建模 TODO。
 
 ## 2026-05-25 other_ops 设计文档补齐
 
@@ -621,7 +621,8 @@ other_ops 专用 summary 结果：
 已知不支持/遗留：
 
 - 通信类 `HcomAllReduce`、`HcomAllGather` 仍按规则排除。
-- transformer/vector fusion 类：`AutomaticBufferFusionOp`、`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
+- transformer/vector fusion 类：`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
+- 忽略项：`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估。
 - Attention shape `N/A` 行：`FusedInferAttentionScore` 140 行，需要 profiling 补 shape 或从上下文恢复规格。
 
 本验证集新增 unsupported Type：
@@ -636,3 +637,13 @@ other_ops 专用 summary 结果：
 - `LogicalNot`
 - `Data`
 - `Unpack`
+
+## 2026-05-27 AutomaticBufferFusionOp 口径调整
+
+用户确认 `AutomaticBufferFusionOp` 是融合算子，且不是固定 pattern 融合，无法从 `Type/shape` 直接评估。
+
+本轮处理：
+
+- `AutomaticBufferFusionOp` 从后续 transformer/vector fusion 建模 TODO 中移除。
+- 在 `eval_results/20260527T075806Z_e632e87_longcat910c_validation/unsupported_types.csv` 中改为 `ignored_unestimable_fusion`。
+- 文档中保留其 unresolved 统计背景，但不再把它视为需要补模型的 unsupported Type。

@@ -475,7 +475,7 @@ file,line,type,name,reason,input_shapes,output_shapes,input_dtypes,output_dtypes
 - `Gather/Scatter/TopK/MoE`：缺 indices、selected count、routing/token 分布，当前只能 low-confidence fallback。
 - `Pack/Slice/Transpose/AsStrided/Concat/Tile`：缺 axis、offset、stride、multiples 等 attrs，不能 exact replay。
 - `Conv2D`：已分类为 `cv_regular`，但当前没有 Cube tiling/BT/fixpipe 模型。
-- 模型样本 unresolved：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MlaPrologV3`、`LightningIndexerQuant`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens` 等需要下一轮 transformer/vector fusion 设计。
+- 模型样本 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MlaPrologV3`、`LightningIndexerQuant`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens` 等需要下一轮 transformer/vector fusion 设计。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
 
 ## 后续任务
 

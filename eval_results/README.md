@@ -49,7 +49,7 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 
 - 910C 基础 other_ops 覆盖已较完整，unresolved 只剩 `MemSet N/A` 34 行。
 - 910B4 / 模型样本 top tail 大多来自 index/scatter/gather 缺少 indices 或 selected count，当前是明确 low-confidence fallback，不能用随机访问因子拟合。
-- 模型样本新增 unresolved 主要是 transformer/vector fusion：`AutomaticBufferFusionOp`、`RotaryMul`、`DynamicQuant`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`，应作为下一轮算子族设计处理。
+- 模型样本新增 unresolved 主要是 transformer/vector fusion：`RotaryMul`、`DynamicQuant`、`MlaPrologV3`、`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`，应作为下一轮算子族设计处理。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
 - `Conv2D` 已归入 `cv_regular`，但当前仍是低置信 fallback，后续需要按 `ops-nn/conv/conv2d_v2` host tiling/Cube 路径单独建模。
 
 ## 910C longcat 验证集
@@ -65,9 +65,10 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 | `longcat_910c_attention` | 140 | 140 | 14.075 | 13.686 | 13.237 | 0.070 | `FusedInferAttentionScore B=161,Sq=8,Sk=128,D=512` 高估 |
 | `longcat_910c_other_ops` | 1740 | 630 | 374.256 | 1.128 | 0.563 | 1.194 | `GatherV2` 缺 indices 的低置信 fallback |
 
-新增不支持评估 Type：
+不支持评估 Type：
 
-- 已知 unsupported：`AutomaticBufferFusionOp`、`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
+- 忽略项：`AutomaticBufferFusionOp`，它是非固定 pattern 融合算子，无法直接评估。
+- 已知 unsupported：`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
 - 新增 unsupported：`FloorDiv`、`FloorMod`、`ReduceMax`、`GatherElementsV2`、`Maximum`、`Cumsum`、`Tril`、`LogicalNot`、`Data`、`Unpack`。
 - 解析缺口：`FusedInferAttentionScore` 有 140 行 shape 为 `N/A`，Type 本身已支持，但这些行无法解析为 Attention spec。
 

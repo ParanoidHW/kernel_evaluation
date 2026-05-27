@@ -1,6 +1,6 @@
 type,count,status,note
 FusedInferAttentionScore,140,parse_gap,"Attention rows with N/A input/output shapes; Type itself is supported when shapes are parseable"
-AutomaticBufferFusionOp,155,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+AutomaticBufferFusionOp,155,ignored_unestimable_fusion,"runtime fusion wrapper with non-fixed fusion pattern; cannot be directly evaluated from Type/shape alone"
 MlaPrologV3,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
 DynamicQuant,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
 AddRmsNormDynamicQuant,70,known_unsupported,"already tracked as transformer/vector fusion unresolved"
@@ -14,4 +14,3 @@ Tril,5,new_unsupported,"triangular mask/layout op not covered"
 LogicalNot,5,new_unsupported,"boolean elementwise op not covered"
 Data,5,new_unsupported,"framework/data placeholder row not modeled as kernel cost"
 Unpack,5,new_unsupported,"layout split variant not covered; related Pack is supported"
-
