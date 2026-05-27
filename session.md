@@ -587,3 +587,52 @@ other_ops 专用 summary 结果：
 - 将原先单一术语大表拆为四组：`核心概念`、`来源与 Replay`、`结果与误差字段`、`诊断与限制`。
 - 保留 `xxx_replay` 后缀约定为独立表格，避免和正文术语混排。
 - 术语语义保持不变，仅优化阅读结构，便于按问题类型快速查找。
+
+## 2026-05-27 910C longcat 验证集
+
+用户新增 profiling：
+
+- `example_profilings/910C/longcat_kernel_details.csv`
+
+本轮只作为验证集检查当前建模精度，不刷新正式 `eval_results/LATEST`。使用配置：
+
+- `configs/ascend_910c.json`
+
+生成报告：
+
+- `/tmp/longcat_910c_matmul.csv`
+- `/tmp/longcat_910c_gmm.csv`
+- `/tmp/longcat_910c_attention.csv`
+- `/tmp/longcat_910c_other_ops.csv`
+
+已新增轻量验证快照：
+
+- `eval_results/20260527T075806Z_e632e87_longcat910c_validation/eval_summary.csv`
+- `eval_results/20260527T075806Z_e632e87_longcat910c_validation/unsupported_types.csv`
+- `eval_results/20260527T075806Z_e632e87_longcat910c_validation/metadata.txt`
+
+验证结果：
+
+- MatMul：resolved `695`，unresolved `0`，relative error max `3.797`，p95 `3.547`，median `0.749`。主要 tail 是 `QuantBatchMatmulV3` Weight-NZ/small-M 高估；`TransposeBatchMatMul` 仍属于已知 transpose/strided 残留。
+- GMM：resolved `140`，unresolved `0`，普通单点 relative error max `14.072`，p95 `5.481`，median `2.250`。按现有单点均值明显高估，且有 below-bound/min-bound 问题；仍应优先按 routing bounds 和真实 group/tuning 信息解释。
+- Attention：resolved `140`，unresolved `140`。resolved 行均为 `FusedInferAttentionScore B=161,Sq=8,Sk=128,D=512`，source-strategy 模型显著高估，relative error max `14.075`，p95 `13.686`，median `13.237`。另有 140 行 `FusedInferAttentionScore` shape 为 `N/A`，属于解析缺口，不是新 Type。
+- Other Ops：resolved `1740`，unresolved `630`，relative error max `374.256`，p95 `1.128`，median `0.563`。top tail 仍是 `GatherV2` 缺 indices 的低置信 fallback。
+
+已知不支持/遗留：
+
+- 通信类 `HcomAllReduce`、`HcomAllGather` 仍按规则排除。
+- transformer/vector fusion 类：`AutomaticBufferFusionOp`、`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
+- Attention shape `N/A` 行：`FusedInferAttentionScore` 140 行，需要 profiling 补 shape 或从上下文恢复规格。
+
+本验证集新增 unsupported Type：
+
+- `FloorDiv`
+- `FloorMod`
+- `ReduceMax`
+- `GatherElementsV2`
+- `Maximum`
+- `Cumsum`
+- `Tril`
+- `LogicalNot`
+- `Data`
+- `Unpack`

@@ -1,0 +1,17 @@
+type,count,status,note
+FusedInferAttentionScore,140,parse_gap,"Attention rows with N/A input/output shapes; Type itself is supported when shapes are parseable"
+AutomaticBufferFusionOp,155,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+MlaPrologV3,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+DynamicQuant,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+AddRmsNormDynamicQuant,70,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+FloorDiv,20,new_unsupported,"math integer elementwise op not covered by current other_ops source map/model"
+FloorMod,20,new_unsupported,"math integer elementwise op not covered by current other_ops source map/model"
+ReduceMax,20,new_unsupported,"reduction variant not covered by current other_ops reduction map"
+GatherElementsV2,20,new_unsupported,"index/gather variant not covered; related GatherElements is supported"
+Maximum,15,new_unsupported,"binary elementwise max op not covered by current other_ops map"
+Cumsum,10,new_unsupported,"scan/prefix-sum op not covered by current reduction model"
+Tril,5,new_unsupported,"triangular mask/layout op not covered"
+LogicalNot,5,new_unsupported,"boolean elementwise op not covered"
+Data,5,new_unsupported,"framework/data placeholder row not modeled as kernel cost"
+Unpack,5,new_unsupported,"layout split variant not covered; related Pack is supported"
+

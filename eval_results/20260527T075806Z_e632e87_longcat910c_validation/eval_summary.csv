@@ -1,0 +1,6 @@
+report,rows,evaluated,unresolved,relative_error_max,relative_error_p95,relative_error_p90,relative_error_median,duration_over_estimate_median,lower_bound_violations,top_tail,notes
+longcat_910c_matmul,695,695,0,3.7966,3.5475,3.4219,0.7489,2.0796,0,QuantBatchMatmulV3,"top tail is Weight-NZ/small-M QuantBatchMatmulV3 overestimate; TransposeBatchMatMul remains known transpose/strided residual"
+longcat_910c_grouped_matmul,140,140,0,14.0724,5.4813,4.6305,2.2497,0.3077,140,GroupedMatmul,"single-point estimate is high; GMM should use routing bounds, but this validation has below-bound/min-bound issues under current interval model"
+longcat_910c_attention,140,140,140,14.0754,13.6855,13.5991,13.2375,0.0702,0,FusedInferAttentionScore,"140 resolved FIA rows are B=161 Sq=8 Sk=128 D=512 and overestimated by source-strategy model; 140 additional FIA rows have N/A shapes and are unresolved"
+longcat_910c_other_ops,1740,1740,630,374.2560,1.1278,0.9608,0.5625,1.1941,70,GatherV2,"top tail is known low-confidence GatherV2 missing indices; unresolved types listed in unsupported_types.csv"
+

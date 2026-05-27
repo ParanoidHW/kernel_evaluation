@@ -1,0 +1,8 @@
+evaluated_at_utc=20260527T075806Z
+commit=e632e87
+validation_only=true
+profiling=example_profilings/910C/longcat_kernel_details.csv
+config=configs/ascend_910c.json
+reports=4
+note=This snapshot is a validation-set check only. It does not update eval_results/LATEST.
+
