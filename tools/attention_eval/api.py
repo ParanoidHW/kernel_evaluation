@@ -127,6 +127,7 @@ def _attention_defaults(config: dict[str, Any]) -> dict[str, float]:
             "short_prefill_template_factor": 1.15,
             "flash_short_prefill_template_factor": 1.15,
             "fused_infer_short_prefill_template_factor": 1.60,
+            "fused_infer_pa_short_prefill_template_factor": 1.15,
             "flash_prefill_template_factor": 2.1,
             "fused_infer_prefill_template_factor": 2.1,
         }
@@ -156,6 +157,7 @@ def _attention_defaults(config: dict[str, Any]) -> dict[str, float]:
         "short_prefill_template_factor": 1.30,
         "flash_short_prefill_template_factor": 1.30,
         "fused_infer_short_prefill_template_factor": 10.80,
+        "fused_infer_pa_short_prefill_template_factor": 1.15,
         "flash_prefill_template_factor": 2.55,
         "fused_infer_prefill_template_factor": 3.0,
     }
@@ -176,6 +178,8 @@ def _template_factor(config: dict[str, Any], kernel_type: str, spec: AttentionSp
         key = "decode_template_factor"
     elif spec.q_seq <= 512 and spec.kv_seq <= 512 and "flashattentionscore" in text:
         key = "flash_short_prefill_template_factor"
+    elif spec.q_seq <= 512 and spec.kv_seq <= 512 and "fusedinfer" in text and "pa_" in spec.layout:
+        key = "fused_infer_pa_short_prefill_template_factor"
     elif spec.q_seq <= 512 and spec.kv_seq <= 512 and "fusedinfer" in text:
         key = "fused_infer_short_prefill_template_factor"
     elif spec.q_seq <= 512 and spec.kv_seq <= 512:

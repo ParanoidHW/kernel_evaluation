@@ -652,6 +652,35 @@ stage2 已完成覆盖：
 
 stage2 后 `other_ops` resolved 从 `1740` 增加到 `1860`，unresolved 从 `630` 降到 `510`，median relative error 从 `0.563` 降到 `0.515`。剩余新增 unsupported 仅 `Data` 5 行；`GatherV2` 缺 indices 仍是最大误差 tail。
 
+## 2026-05-28 FIA PA-NZ cache parser 修复
+
+本轮继续处理 910C longcat 验证集中的 `FusedInferAttentionScore` 高估问题。
+
+源码依据：
+
+- `ops-transformer-master/attention/fused_infer_attention_score/docs/aclnnFusedInferAttentionScoreV5.md` 说明 PagedAttention 使用 block table 和 blockSize 管理 KV cache。
+- PA 场景下 KV cache 可为 `BnNBsD` 或 NZ 形式；本样本 K/V shape 为 `[161,1,32,128,16]`，应解释为 `blockNum=161, KV_N=1, D/16=32, blockSize=128, D0=16`，不是 `B=161`。
+
+实现：
+
+- `tools/attention_eval/common.py` 新增 FIA PA cache parser。
+- parser 从 query 得到逻辑 batch/q_seq/head_dim，从 block table `[4,40]` 得到 `B=4` 和 `kv_seq=40*128=5120`。
+- 5D NZ cache 标记为 `layout=pa_nz_cache`。
+- `tools/attention_eval/api.py` 新增 `fused_infer_pa_short_prefill_template_factor`，避免把普通 FIA short-prefill 的高 template factor 套到 PA cache 路径。
+
+验证：
+
+- 命令：`python3 tools/eval_ops.py --op-kind attention --profiling example_profilings/910C/longcat_kernel_details.csv --config configs/ascend_910c.json --output /tmp/longcat_910c_attention_stage3.csv --unresolved-output /tmp/longcat_910c_attention_stage3_unresolved.csv`
+- relative error max：`14.075 -> 3.362`
+- p95：`13.686 -> 3.249`
+- median：`13.237 -> 3.119`
+- duration/estimate median：`0.070 -> 0.243`
+
+剩余问题：
+
+- profiling 缺 block table 实际值和 `actualSeqLengthsKv` 数组，当前只能按 `maxBlockNumPerSeq * blockSize` 估计 active KV 范围。
+- 继续降低 PA cache 流量会变成对单个样本反推 active block 数；因此剩余 tail 记录为需要 runtime block table/actualSeqLengths 后再继续。
+
 ## 2026-05-27 AutomaticBufferFusionOp 口径调整
 
 用户确认 `AutomaticBufferFusionOp` 是融合算子，且不是固定 pattern 融合，无法从 `Type/shape` 直接评估。

@@ -126,6 +126,10 @@ def infer_attention_spec(
 
     if variant == "kv_quant_sparse_flash_attention":
         return _infer_kv_quant_sparse_attention_spec(input_shapes, output_shapes, q_dims, k_dims, v_dims)
+    if variant == "fused_infer_attention":
+        pa_spec = _infer_fused_infer_pa_attention_spec(input_shapes, output_shapes, q_dims, k_dims, v_dims)
+        if pa_spec is not None:
+            return pa_spec
 
     head_dim = q_dims[-1]
     value_dim = v_dims[-1]
@@ -174,6 +178,103 @@ def infer_attention_spec(
         layout=f"{q_layout}|{k_layout}",
         variant=variant,
         causal_or_masked=causal_or_masked,
+    )
+
+
+def _infer_fused_infer_pa_attention_spec(
+    input_shapes: list[list[int]],
+    output_shapes: list[list[int]],
+    q_dims: list[int],
+    k_dims: list[int],
+    v_dims: list[int],
+) -> AttentionSpec | None:
+    """Infer FIA paged-attention shapes from KV-cache storage layout.
+
+    FusedInferAttentionScore PA uses K/V cache shapes such as
+    `[blockNum, KV_N, blockSize, D]` and a block table `[B, maxBlockNum]`.
+    The cache's first dimension is storage capacity, not logical batch.
+    Treating it as batch makes the generic parser charge the whole cache.
+    """
+
+    if len(q_dims) < 3 or len(k_dims) not in {4, 5} or len(v_dims) not in {4, 5}:
+        return None
+    if len(input_shapes) <= 3:
+        return None
+
+    head_dim = q_dims[-1]
+    q_info = _choose_sequence_dim(q_dims, head_dim)
+    if q_info is None:
+        return None
+    q_batch, q_heads, q_seq, q_layout = q_info
+
+    block_table_dims: list[int] = []
+    for shape in input_shapes[3:]:
+        dims = _positive_dims(shape)
+        if len(dims) == 2 and dims[0] == q_batch:
+            block_table_dims = dims
+            break
+    if len(block_table_dims) != 2:
+        return None
+
+    if len(k_dims) == 5:
+        kv_heads = k_dims[1]
+        block_size = k_dims[3]
+        kv_head_dim = k_dims[2] * k_dims[4]
+        layout = f"{q_layout}|pa_nz_cache"
+    else:
+        kv_heads = k_dims[1]
+        block_size = k_dims[2]
+        kv_head_dim = k_dims[3]
+        layout = f"{q_layout}|pa_b_n_bs_d"
+    if len(v_dims) == 5:
+        value_dim = v_dims[2] * v_dims[4]
+    else:
+        value_dim = v_dims[-1]
+    if kv_heads <= 0 or block_size <= 0 or kv_head_dim <= 0 or value_dim <= 0:
+        return None
+
+    table_batch, max_blocks_per_batch = block_table_dims
+    batch = max(1, q_batch)
+    if table_batch > 0:
+        batch = table_batch
+    kv_seq = max(1, max_blocks_per_batch * block_size)
+    active_kv_elements = batch * kv_heads * kv_seq * kv_head_dim
+    active_v_elements = batch * kv_heads * kv_seq * value_dim
+    output_elements = _shape_elements(output_shapes[0]) if output_shapes else batch * q_heads * q_seq * value_dim
+    score_elements = batch * q_heads * q_seq * kv_seq
+
+    raw_aux_elements = sum(_shape_elements(shape) for shape in input_shapes[3:])
+    aux_elements = 0
+    for index, shape in enumerate(input_shapes[3:], start=3):
+        elements = _shape_elements(shape)
+        if elements <= 0:
+            continue
+        if index == 4:
+            aux_elements += elements
+            continue
+        if len(_positive_dims(shape)) >= 2 and elements > score_elements:
+            aux_elements += score_elements
+        else:
+            aux_elements += elements
+
+    return AttentionSpec(
+        batch=batch,
+        q_heads=max(1, q_heads),
+        kv_heads=max(1, kv_heads),
+        q_seq=max(1, q_seq),
+        kv_seq=kv_seq,
+        head_dim=max(1, head_dim),
+        value_dim=max(1, value_dim),
+        output_elements=output_elements,
+        q_elements=_shape_elements(q_dims),
+        k_elements=active_kv_elements,
+        v_elements=active_v_elements,
+        aux_elements=aux_elements,
+        raw_aux_elements=raw_aux_elements,
+        score_elements=score_elements,
+        layout=layout,
+        variant="fused_infer_attention",
+        causal_or_masked=aux_elements > 0,
     )
 
 

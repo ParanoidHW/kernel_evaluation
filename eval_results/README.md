@@ -62,7 +62,7 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 |---|---:|---:|---:|---:|---:|---:|---|
 | `longcat_910c_matmul` | 695 | 0 | 3.797 | 3.547 | 0.749 | 2.080 | `QuantBatchMatmulV3` Weight-NZ/small-M 高估 |
 | `longcat_910c_grouped_matmul` | 140 | 0 | 14.072 | 5.481 | 2.250 | 0.308 | GMM 单点均值高估，且出现 below-bound/min-bound 问题 |
-| `longcat_910c_attention` | 140 | 140 | 14.075 | 13.686 | 13.237 | 0.070 | `FusedInferAttentionScore B=161,Sq=8,Sk=128,D=512` 高估 |
+| `longcat_910c_attention` | 140 | 140 | 3.362 | 3.249 | 3.119 | 0.243 | `FusedInferAttentionScore` PA-NZ cache 仍高估 |
 | `longcat_910c_other_ops` | 1860 | 510 | 374.256 | 1.128 | 0.515 | 1.189 | `GatherV2` 缺 indices 的低置信 fallback |
 
 不支持评估 Type：
@@ -72,6 +72,7 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 - 已在 stage2 支持：`FloorDiv`、`FloorMod`、`ReduceMax`、`GatherElementsV2`、`Maximum`、`Cumsum`、`Tril`、`LogicalNot`、`Unpack`。
 - 新增 unsupported：`Data`。
 - 解析缺口：`FusedInferAttentionScore` 有 140 行 shape 为 `N/A`，Type 本身已支持，但这些行无法解析为 Attention spec。
+- stage3 Attention 修复：已将可解析 FIA PA-NZ cache 从 `B=161,Sq=8,Sk=128` 修正为 `B=4,Sq=8,Sk=5120`，并区分 PA short-prefill template。剩余高估需要 runtime block table/actualSeqLengths。
 
 ## 最新增量快照
 

@@ -82,6 +82,28 @@ increflashattention / incre_flash_attention
 
 这部分修复避免了把 PA cache 第一维误当 batch 导致的 QSFA lower-bound violation。
 
+### FusedInferAttentionScore PA cache
+
+`FusedInferAttentionScore` 也可能使用 PagedAttention KV cache。源码和接口文档显示：
+
+- block table shape 为 `[B, maxBlockNumPerSeq]`。
+- `blockSize` 决定每个 KV cache block 的 token 数。
+- KV cache 可使用 `BnNBsD` 或 NZ 形式，例如 profiling 中的 `[blockNum, KV_N, D/16, blockSize, 16]`。
+- cache 第一维 `blockNum` 是存储容量，不是逻辑 batch。
+
+当前 parser 对可见 PA/NZ cache 做 source-visible 规格重建：
+
+- 从 query 解析逻辑 `B/q_seq/q_heads/head_dim`。
+- 从 block table shape 和 blockSize 估计 `kv_seq = maxBlockNumPerSeq * blockSize`。
+- 从 5D NZ cache 解析 `kv_heads` 和 `head_dim`。
+- `layout` 标记为 `pa_nz_cache`，用于和普通 FIA short-prefill 模板区分。
+
+限制：
+
+- profiling CSV 不包含 block table 实际值和 `actualSeqLengthsKv` 数组。
+- 因此只能按 max blocks 估计 active KV 范围，无法知道本次真实访问了多少 blocks。
+- 不允许为了单个样本把 PA cache 流量压到实测值；后续需要 runtime block table/actualSeqLengths 后才能继续收敛。
+
 ## 源码路径与 replay 语义
 
 当前使用的本地源码路径：
@@ -261,6 +283,7 @@ Attention 参数位于 `configs/*.json::attention_model`。当前区分：
 - `decode_latency_floor_us`
 - `flash_decode_latency_floor_us`
 - `fused_infer_decode_latency_floor_us`
+- `fused_infer_pa_short_prefill_template_factor`
 - `short_prefill_latency_floor_us`
 - `prefill_latency_floor_us`
 - `sync_us_per_kv_tile`
