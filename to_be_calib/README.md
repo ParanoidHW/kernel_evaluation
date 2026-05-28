@@ -14,8 +14,11 @@
 | --- | --- | --- | --- | --- |
 | P0 | `MlaPrologV3` | 已有低置信 fallback，需增强为源码 tiling 搜索 | `ops-transformer-master/attention/mla_prolog_v3` 复用 `mla_prolog` host tiling，device kernel 拆为四个 Matmul、RMSNorm、Rope、cache 写入和多处 AIC/AIV 同步 | profiling 通常缺 `tiling_key`、`actual_seq_len`、`cache_index` 实际值 |
 | P1 | `QuantLightningIndexer` / `LightningIndexerQuant` | 已支持可配置 type alias 和低置信估计 | `ops-transformer-master/attention/quant_lightning_indexer` | 缺 `sparse_count`、`sparse_mode`、`actual_seq_lengths`、`block_table` 实际值 |
-| P2 | 常规向量融合算子 | 已有源码分类和粗模型 | `ops-math`、`ops-nn`、`ops-transformer` 中的 elementwise/reduction/norm kernel | 部分算子缺具体 tiling 常量或动态 mask |
-| P3 | CV/图像算子 | 已有评估计划，尚未逐个落地 | `ops-cv` | profiling 样本和 layout/ROI 运行时元数据不足 |
+| P2 | Transformer/vector fusion | 已有源码分类和粗模型 | `ops-transformer-master/posembedding`、`ops-nn/quant`、`ops-nn/norm`、`ops-math/math` | 缺 actual tiling、axis/mode、cache/rope 运行时值或小 kernel 固定开销来源 |
+| P3 | Index/scatter/routing | 已有 analytic fallback，top tail 明显 | `ops-nn/index`、`ops-transformer-master/moe` | indices、mask selected count、routing/token 分布缺失 |
+| P4 | Layout/memory fallback | 已有 source strategy replay，但缺 attrs 时低置信 | `ops-math/conversion`、`ops-nn/index` | perm、axis、begin/size/stride、multiples、diagonal 等 attrs 缺失 |
+| P5 | CV/图像算子 | 已有评估计划，尚未逐个落地 | `ops-cv`、`ops-nn/conv` | profiling 样本和 layout/ROI 运行时元数据不足 |
+| P6 | MatMul/Attention/GMM fallback tiling | 已有专用评估器和遗留分类 | `ops-nn/matmul`、`ops-transformer-master/attention`、`ops-transformer-master/gmm` | exact tiling、runtime KB、模板 key、routing/block table 缺失 |
 
 显式排除：
 
@@ -150,6 +153,108 @@ AIV: GetSinCos -> wait MatmulCq -> RmsNormCq -> signal MatmulQcQr
 
 `estimated_us` 取 `source_schedule_bound_us`。当 `actualSeqLen/cacheIndex/quant attr` 缺失导致 candidate 集合不唯一时，输出区间均值作为默认单点，同时保留 `lower_bound_us/upper_bound_us` 和 `diagnosis`。
 
+## 其他低置信算子设计
+
+### QuantLightningIndexer / LightningIndexerQuant
+
+`LightningIndexerQuant` 已通过可配置 alias 映射到源码 Type `QuantLightningIndexer`。该映射属于评估入口策略，不写入硬件配置。
+
+| 项 | 设计 |
+| --- | --- |
+| 源码路径 | `ops-transformer-master/attention/quant_lightning_indexer` |
+| 输入解析 | query/key INT8 shape 推断 `q_tokens`、`q_heads`、`head_dim`、KV block/page 数；输出 sparse index shape 推断 `sparse_count` 上界 |
+| 计算子图 | INT8 QK score、PA block 遍历、score workspace、TopK/sparse index 选择、index 输出 |
+| tiling 搜索 | 按 Q token、KV block、head 维和 sparse_count 枚举 block 粒度；过滤 UB/workspace 和 AIC/AIV 分配 |
+| 成本项 | Cube INT8 QK、Vector TopK/排序选择、workspace score 写读、sparse index 写出、block table/actual seq 读取 |
+| 缺失运行时值 | `sparse_count`、`sparse_mode`、`actual_seq_lengths_query`、`actual_seq_lengths_key`、`block_table_values` |
+| 输出语义 | `source_tiling_search_no_calib`；缺运行时值时输出 `lower_bound_us/source_schedule_bound_us/upper_bound_us`，单点取区间均值 |
+
+不能用实测 duration 调整 TopK factor。若 `block_table` 或 actual seq 缺失，评估必须保留 `missing_sparse_runtime_values`，并给出 dense-all-block 与 active-block 两个边界。
+
+### Rope 与 KV cache 融合类
+
+覆盖 `RotaryMul`、`RotaryPositionEmbedding`、`InterleaveRope`、`KvRmsNormRopeCache`、`QkvRmsNormRopeCache` 等。
+
+| 算子/族 | 源码路径 | 正向建模方案 | 缺口与输出 |
+| --- | --- | --- | --- |
+| `RotaryMul` | `ops-transformer-master/posembedding/apply_rotary_pos_emb` | 按 query/key head 维拆成 sin/cos 读、even/odd rotate、mul/add、输出写；按 UB tile 枚举行块 | 缺 rotary mode、interleave flag 时输出 `rope_mode_unknown` |
+| `RotaryPositionEmbedding` | `ops-transformer-master/posembedding/rotary_position_embedding` | 同上，额外处理 position ids/gather sincos 的随机读边界 | 缺 position ids 值时输出 gather 边界 |
+| `InterleaveRope` | `ops-transformer-master/posembedding/interleave_rope` | 将 head dim 拆成 pair/interleave lane，估计重排、sin/cos、mul/add、GM 写回 | 缺 interleave layout/position 值时使用区间 |
+| `KvRmsNormRopeCache` | `ops-transformer-master/posembedding/kv_rms_norm_rope_cache` | DAG：KV RMSNorm reduce -> scale -> rope -> PA/BSND cache scatter；按 token/head/cache block 枚举 vector tile | 缺 cache_index/actual_seq 时输出 active cache 写入上下界 |
+| `QkvRmsNormRopeCache` | `ops-transformer-master/posembedding/qkv_rms_norm_rope_cache` | 在 KV 分支基础上增加 Q branch norm/rope 输出；共享 sin/cos 读和 cache scatter | 缺 q/kv 分支 attrs 时保持 low confidence |
+
+这类算子是 AIV/vector-heavy，不应通过新增“rope_efficiency”拟合。可解释参数只能来自：元素个数、head dim、pair/interleave 布局、sin/cos 读取方式、cache 写入格式、UB tile 容量、AIV 数和 HBM 带宽。
+
+### DynamicQuant / AddRmsNormDynamicQuant / Rsqrt
+
+| 算子/族 | 源码路径 | 正向建模方案 | 缺口与输出 |
+| --- | --- | --- | --- |
+| `DynamicQuant*` | `ops-nn/quant/dynamic_quant`、`ops-nn/quant/dynamic_quant_v2` | 每行 reduce absmax/max、计算 scale、可选 smooth、quant cast、scale 输出；按 row/hidden 枚举 UB tile | 缺 `dst_type/quant_mode/symmetry` 时输出候选集合 |
+| `AddRmsNormDynamicQuant*` | `ops-nn/norm/add_rms_norm_dynamic_quant` | add residual、RMS reduce、rsqrt、gamma/beta/smooth、quant、scale 输出；多输出按 output shape 计流量 | 缺 optional smooth/bias 语义时区间 |
+| `MultiAddRmsNormDynamicQuant` | `ops-nn/norm/multi_add_rms_norm_dynamic_quant` | 多 residual 输入累加后走 RMSNorm+quant；输入数决定读流量和 add pass | 缺融合输入实际个数时 unresolved 或区间 |
+| `Rsqrt` | `ops-math/math/rsqrt` | 单输入单输出 transcendental vector pipeline；按 dtype 和元素数估算 vector ops 与 HBM | 小 shape 主要受 launch/sync floor 影响，硬件配置缺 floor 时标记 `launch_unknown` |
+
+`Rsqrt` 在 qwen7b other_ops 中大量出现，但它本身不是 tiling 难点；主要问题是小 kernel 固定开销和调度开销。若硬件配置没有 launch/sync 参数，不能从 qwen 样本反推一个专用 floor。
+
+### Index / Scatter / Mask / Routing
+
+这类算子不能在缺运行时值时给出 exact 单点，因为 indices、mask 和 routing 分布本身决定实际访问量和 cache locality。正向方案应改为 bounds-first。
+
+| 算子/族 | 源码路径 | bounds 设计 | 缺口 |
+| --- | --- | --- | --- |
+| `GatherV2/GatherV3/GatherElements` | `ops-nn/index/gather_v2`、`ops-nn/index/gather_v3`、`ops-nn/index/gather_elements` | 下界：线性/重复 indices 命中；上界：随机 GM gather；区间按输出元素、index dtype、axis 维度和 cacheline 放大 | indices 值、axis |
+| `Scatter*` | `ops-nn/index/scatter`、`ops-nn/index/scatter_nd`、`ops-nn/index/scatter_elements_v2` | 下界：无冲突连续写；上界：随机写+atomic/冲突；按 update 元素和 index fanout 建区间 | indices、冲突率、reduction mode |
+| `MaskedSelectV3/NonZero` | `ops-math/conversion/masked_select_v3`、`ops-nn/index/non_zero` | 下界：mask 全 false 或低 selected；上界：mask 全 true；估计 mask scan、prefix/compaction、输出写 | selected count/mask 值 |
+| `TopKV2/ArgMaxV2` | `ops-nn/index/apply_top_k_top_p_with_sorted`、`ops-math/math/arg_max_with_value` | 按 K、axis、row 数估计局部排序/归约；缺 K 分布时输出小 K/全排序边界 | K、axis、sorted flag |
+| MoE routing | `ops-transformer-master/moe/moe_*` | 按 token 数、expert 数、topK、routing table 建 balanced/extreme bounds；空 expert skip 和 tail imbalance 显式输出 | routing values、per-expert token 分布 |
+| `MoeComputeExpertTokens` | `ops-transformer-master/moe/moe_compute_expert_tokens` | 计 routing list scan、expert token count reduce、prefix/offset 输出；balanced/extreme 两端 | expert 分布和 topK |
+
+后续实现时，`estimated_us` 建议默认写区间均值，但报告必须包含 `bounds_min_us/bounds_max_us` 和 `bounds_reason`。`GatherV2` 当前 top tail 不应通过调低 `index_random_access_factor` 修正。
+
+### Layout / Memory 缺 attrs
+
+已有 `source_strategy_replay_missing_attrs`，但缺 attrs 的行不应升级为 actual tiling。
+
+| 算子/族 | 源码路径 | 正向建模方案 | 缺口 |
+| --- | --- | --- | --- |
+| `Transpose` | `ops-math/conversion/transpose` | 枚举常见 perm：last2 swap、NHWC/NCHW、rank reverse；分别估计 NDDMA/vconv/UB tile 搬运 | `perm` |
+| `Slice/StridedSlice/AsStrided` | `ops-math/conversion/slice`、`strided_slice`、`as_strided` | 根据 contiguous slice、strided gather、NDDMA 三类路径给 bounds | begin/size/end/stride/storage_offset |
+| `Concat/Split/Pack/Unpack` | `ops-math/conversion/concat`、`split`、`pack` | 枚举 axis 候选，计算每段线性搬运和小 tensor 调度开销 | axis |
+| `Tile` | `ops-math/math/tile` | 根据 multiples 枚举广播复制层级；缺 multiples 时用 output/input ratio 边界 | multiples |
+| `PadV3` | `ops-math/conversion/pad_v3` | 输入 copy + padding fill；按 padding mode 区分 constant/reflect/edge | pads、mode、constant value |
+| `Sort/SortV2` | `ops-math/math/sort`、`ops-math/experimental/math/sort_v2` | 按 row length、axis 和 dtype 建 bitonic/merge/local sort 近似；小 K 与全 axis 排序分开 | axis、descending、stable |
+| `RepeatInterleaveV2` | 需按源码定位到 repeat/interleave 实现 | 下界连续复制，上界按 indices/repeats 展开随机/变长复制 | repeats 值、axis |
+| `MemSet` | `ops-math/conversion/mem_set` | 有 output shape/dtype 时按 fill GM 写和 vector fill 估计 | profiling 为 `N/A` 时仍 unresolved |
+
+### Conv / CV / 图像类
+
+`Conv2D` 当前在 other_ops 中只是 `cv_regular` fallback，应独立成 Cube-heavy 正向方案，不与 elementwise/vector 混用。
+
+| 算子/族 | 源码路径 | 正向建模方案 | 缺口 |
+| --- | --- | --- | --- |
+| `Conv2D` | `ops-nn/conv` 或 `ops-nn/conv2d_v2`，本地缺目录时降级 `source_path_pending` | 解析 N/C/H/W、Cout、KH/KW、stride/pad/dilation/group；估计 im2col/Load3D、Cube FLOPs、L0/L1/BT、bias/activation/fixpipe、NC1HWC0/FRACTAL_Z layout | exact tiling、format attrs、group/pad/stride |
+| `Conv3DV2` | `ops-nn/conv3d` | 在 Conv2D 基础上增加 D 维 tile 和 z 方向重复加载 | 3D tiling/format |
+| `Resize*` | `ops-cv` 或 `ops-nn` resize 路径 | 按 output pixel、插值核、坐标计算、边界处理、GM 读写估计 | align_corners、half_pixel、ROI |
+| `GridSample*` | `ops-cv` | 每 output 采样 4/8 邻域，估计 gather、插值、边界 mode | grid 值、padding mode |
+| ROI/NMS | `ops-cv` | ROI Align 按 bin/sample ratio；NMS 按 box 数排序和 IoU 矩阵/筛选 bounds | boxes 分布、threshold、selected count |
+
+CV 类优先级低于 transformer/vector fusion 和 index/routing，因为当前 profiling 覆盖较少，且许多输入 attr 不在 CSV 中。
+
+### MatMul / Attention / GMM 缺 actual tiling
+
+这些已有专用评估器，不迁入 other_ops，但也适用“无校准正向方案”的约束。
+
+| 算子/族 | 当前问题 | 正向增强方案 | 缺口 |
+| --- | --- | --- | --- |
+| base `MatMulV2 M=1` | small-M fallback tiling 残留 | 从 `ops-nn/matmul` 重放 MatmulToMul、disableGemv、L1/L0 copy、sync 流水候选；只在解释 lower-bound violation 后启用 | exact tiling/template key、runtime KB |
+| `TransposeBatchMatMul` | transpose/strided 装载开销 | 按 perm、stride、SetTensorA/B trans flag 和 GM offset 估计 MTE2/L1/L0 额外搬运 | perm attrs、exact tiling、MTE/fixpipe counter |
+| `QuantBatchMatmulV3` longcat tail | full quant small-M 分支差异 | 继续按 arch35 Weight-NZ、fixpipe、L2 tile、usedCoreNum 重放候选，不新增 shape 校准 | baseN/singleCoreN/tileL2/template key |
+| FIA decode | source-strategy replay residual | 重放 decode/paged cache tiling、KV block 元数据、mask/aux 访问；缺失时只给 bounds | FIA exact tiling、cache/block metadata |
+| QSFA | 稀疏/TopK/PA 残留 | 按 block table、sparse indices、TopK workspace 建 bounds-first 模型 | block table、sparse indices、runtime TopK |
+| `GroupedMatmul` | routing bounds above-bound | 保持 balanced/extreme routing bounds；有 group_list 后才能转单点 | group_list、groupListType、tuningConfig、per-expert tokens |
+
+这些项不得通过扩大经验区间或增加全局 latency floor 来拟合。若缺口未补齐，保持遗留或 bounds。
+
 ## 配置建议
 
 正向评估开关不写入硬件平台配置，避免把算子策略误绑定到某个平台。建议后续新增独立策略配置，例如：
@@ -181,6 +286,9 @@ AIV: GetSinCos -> wait MatmulCq -> RmsNormCq -> signal MatmulQcQr
 | 4 | 实现候选 tiling 容量过滤和成本模型 | 报告 Cube/Vector/GM/workspace/sync 分项和 candidate 选择结果 |
 | 5 | 增加 validation-only 对比 | 使用 profiling 只看残差和分类，不回写经验校准项 |
 | 6 | 将 `QuantLightningIndexer` 纳入同一入口 | 缺 runtime 值时输出区间均值和 `missing_sparse_runtime_values` |
+| 7 | 将 index/scatter/routing 改为 bounds-first 报告 | `Gather/Scatter/Mask/MoE` 输出 `bounds_min_us/bounds_max_us`，默认单点为区间均值 |
+| 8 | 将 layout 缺 attrs 算子枚举常见源码策略候选 | `Transpose/Slice/Pack/Tile/Pad/Sort` 报告候选策略和缺失 attrs |
+| 9 | 为 Conv/CV 类建立独立 Cube/vector/memory 模型 | `Conv2D` 不再只走 `cv_regular` fallback；源码缺失时明确 `source_path_pending` |
 
 ## 当前风险
 

@@ -802,3 +802,27 @@ python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/pro
 4. 增加候选 tiling 容量过滤、Cube/Vector/GM/workspace/sync 分项成本。
 5. validation-only 对比 profiling 残差，不回写经验校准项。
 6. 将 `QuantLightningIndexer` 纳入同一正向评估入口，缺 sparse runtime 值时输出区间均值。
+
+## 2026-05-28 其他低置信算子正向评估方案补充
+
+用户要求除 `MlaPrologV3` 外，其他低置信度/缺真实 tiling 的算子也按“源码 + tiling + 硬件配置、无实测校准”的思路设计方案。已扩展 `to_be_calib/README.md`。
+
+补充分组：
+
+- `QuantLightningIndexer / LightningIndexerQuant`：基于 `ops-transformer-master/attention/quant_lightning_indexer`，按 INT8 QK、PA block 遍历、score workspace、TopK/sparse index 输出建模；缺 `sparse_count/sparse_mode/actual_seq_lengths/block_table` 时输出 dense-all-block 与 active-block bounds，单点取区间均值。
+- Rope/KV cache 融合类：`RotaryMul`、`RotaryPositionEmbedding`、`InterleaveRope`、`KvRmsNormRopeCache`、`QkvRmsNormRopeCache`；按 sin/cos 读取、pair/interleave rotate、RMSNorm reduce、cache scatter 和 UB tile 设计，不新增 rope efficiency 拟合项。
+- quant/norm/vector 类：`DynamicQuant*`、`AddRmsNormDynamicQuant*`、`MultiAddRmsNormDynamicQuant`、`Rsqrt`；按 row reduce、scale、quant、RMSNorm、transcendental vector pipeline 建模；`Rsqrt` 小 shape 残留归因到 launch/sync 配置缺失，不能从 qwen 样本反推 floor。
+- index/scatter/mask/routing：`Gather*`、`Scatter*`、`MaskedSelectV3/NonZero`、`TopKV2/ArgMaxV2`、`Moe*`、`MoeComputeExpertTokens`；明确改为 bounds-first，缺 indices/mask/routing 值时不能声称 exact，`GatherV2` top tail 不通过调 `index_random_access_factor` 修正。
+- layout/memory 缺 attrs：`Transpose`、`Slice/StridedSlice/AsStrided`、`Concat/Split/Pack/Unpack`、`Tile`、`PadV3`、`Sort`、`RepeatInterleaveV2`、`MemSet`；枚举常见源码策略候选，缺 attrs 时保持 `source_strategy_replay_missing_attrs` 或 unresolved。
+- Conv/CV 类：`Conv2D/Conv3DV2`、`Resize*`、`GridSample*`、ROI/NMS；`Conv2D` 应独立按 Cube-heavy 路径设计，解析 NCHW/NC1HWC0、filter、stride/pad/dilation/group、Load3D/im2col、L0/L1/BT、bias/fixpipe，不能继续混在普通 vector fallback 中。
+- MatMul/Attention/GMM 缺 actual tiling：保留专用评估器入口，但补充同样的无校准正向增强边界：base `MatMulV2 M=1`、`TransposeBatchMatMul`、longcat `QuantBatchMatmulV3`、FIA decode、QSFA、`GroupedMatmul` 都需要 exact tiling/runtime KB/template key/routing/block table 才能升级，当前不能靠经验 floor 或扩大区间拟合。
+
+新增实施顺序：
+
+1. `MlaPrologV3` 和 `QuantLightningIndexer` 进入 `source_tiling_search_no_calib` 入口。
+2. Rope/KV cache 融合与 DynamicQuant/Rsqrt 统一 vector source replay 字段。
+3. `Gather/Scatter/Mask/MoE` 改为 bounds-first 报告，输出 `bounds_min_us/bounds_max_us/bounds_reason`。
+4. layout 缺 attrs 算子输出候选策略集合和缺失字段，不升级为 actual tiling。
+5. Conv/CV 类新增独立 Cube/vector/memory 方案，源码缺路径时标记 `source_path_pending`。
+
+关键约束保持不变：profiling 只能用于 validation-only 残差分析，不能用于回写硬件利用率、TopK factor、rope efficiency、index random factor 或 launch floor。
