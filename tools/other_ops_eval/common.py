@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from op_eval.common import dtype_size, num_elements
+from op_eval.common import ceil_div, dtype_size, num_elements
 
 
 MATMUL_TYPES = {
@@ -48,6 +48,7 @@ LAYOUT_MEMORY_TYPES = {
     "slice",
     "stridedsliced",
     "asstrided",
+    "reversev2",
     "concatd",
     "concatv2d",
     "splitvd",
@@ -85,9 +86,20 @@ ELEMENTWISE_TYPES = {
     "maximum",
     "logicalnot",
     "rotarypositionembedding",
+    "rotarymul",
 }
 
-REDUCTION_TYPES = {"reducesum", "reducesumd", "reducemean", "reducemax", "reduceall", "softmaxv2", "cumsum"}
+REDUCTION_TYPES = {
+    "reducesum",
+    "reducesumd",
+    "reducemean",
+    "reducemax",
+    "reduceall",
+    "reduceany",
+    "softmaxv2",
+    "cumsum",
+    "argmaxwithvalue",
+}
 
 NORM_ACTIVATION_TYPES = {
     "rmsnorm",
@@ -102,6 +114,16 @@ NORM_ACTIVATION_TYPES = {
     "gegluv2",
     "dequantswigluquant",
     "groupnormsilu",
+}
+
+QUANT_VECTOR_FUSION_TYPES = {
+    "dynamicquant",
+    "dynamicquantv2",
+    "dynamicquantv3",
+    "dynamicquantv4",
+    "addrmsnormdynamicquant",
+    "addrmsnormdynamicquantv2",
+    "multiaddrmsnormdynamicquant",
 }
 
 INDEX_SCATTER_TYPES = {
@@ -145,6 +167,8 @@ CV_TYPES = {
     "nonmaxsuppressionv3",
     "nonmaxsuppressionv6",
 }
+
+MLA_PROLOG_TYPES = {"mlaprologv3"}
 
 
 @dataclass(frozen=True)
@@ -194,6 +218,7 @@ LAYOUT_SOURCE_PATHS = {
     "slice": "ops-math/conversion/slice",
     "stridedsliced": "ops-math/conversion/strided_slice",
     "asstrided": "ops-math/conversion/as_strided",
+    "reversev2": "ops-nn/index/reverse_v2",
     "concatd": "ops-math/conversion/concat",
     "concatv2d": "ops-math/conversion/concat",
     "splitvd": "ops-math/conversion/split",
@@ -220,6 +245,7 @@ ELEMENTWISE_SOURCE_PATHS = {
     "maximum": "ops-math/math/maximum",
     "logicalnot": "ops-math/math/logical_not",
     "rotarypositionembedding": "ops-transformer-master/posembedding/rotary_position_embedding",
+    "rotarymul": "ops-transformer-master/posembedding/apply_rotary_pos_emb",
 }
 
 REDUCTION_SOURCE_PATHS = {
@@ -228,6 +254,8 @@ REDUCTION_SOURCE_PATHS = {
     "reducemean": "ops-math/math/reduce_mean",
     "reducemax": "ops-math/math/reduce_max",
     "reduceall": "ops-math/math/reduce_all",
+    "reduceany": "ops-math/math/reduce_any",
+    "argmaxwithvalue": "ops-math/math/arg_max_with_value",
     "cumsum": "ops-math/math/cumsum",
     "softmaxv2": "ops-nn/activation/softmax_v2",
 }
@@ -245,6 +273,16 @@ NORM_ACTIVATION_SOURCE_PATHS = {
     "gegluv2": "ops-nn/activation/geglu_v2",
     "dequantswigluquant": "ops-nn/activation/swiglu",
     "groupnormsilu": "ops-nn/norm/group_norm_silu",
+}
+
+QUANT_VECTOR_FUSION_SOURCE_PATHS = {
+    "dynamicquant": "ops-nn/quant/dynamic_quant",
+    "dynamicquantv2": "ops-nn/quant/dynamic_quant_v2",
+    "dynamicquantv3": "ops-nn/quant/dynamic_quant",
+    "dynamicquantv4": "ops-nn/quant/dynamic_quant",
+    "addrmsnormdynamicquant": "ops-nn/norm/add_rms_norm_dynamic_quant",
+    "addrmsnormdynamicquantv2": "ops-nn/norm/add_rms_norm_dynamic_quant",
+    "multiaddrmsnormdynamicquant": "ops-nn/norm/multi_add_rms_norm_dynamic_quant",
 }
 
 INDEX_SCATTER_SOURCE_PATHS = {
@@ -279,13 +317,17 @@ def classify_op_family(op_type: str) -> tuple[str, str, str]:
     if normalized in LAYOUT_MEMORY_TYPES:
         return "layout_memory", "ops-math", LAYOUT_SOURCE_PATHS.get(normalized, "ops-math/conversion")
     if normalized in ELEMENTWISE_TYPES:
-        repo = "ops-transformer-master" if normalized == "rotarypositionembedding" else "ops-math"
+        repo = "ops-transformer-master" if normalized in {"rotarypositionembedding", "rotarymul"} else "ops-math"
         return "elementwise_vector", repo, ELEMENTWISE_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in REDUCTION_TYPES:
         repo = "ops-nn" if normalized == "softmaxv2" else "ops-math"
         return "reduction", repo, REDUCTION_SOURCE_PATHS.get(normalized, "ops-math/math")
     if normalized in NORM_ACTIVATION_TYPES:
         return "norm_activation", "ops-nn", NORM_ACTIVATION_SOURCE_PATHS.get(normalized, "ops-nn/norm_or_activation")
+    if normalized in QUANT_VECTOR_FUSION_TYPES:
+        return "quant_vector_fusion", "ops-nn", QUANT_VECTOR_FUSION_SOURCE_PATHS.get(normalized, "ops-nn/quant_or_norm")
+    if normalized in MLA_PROLOG_TYPES:
+        return "mla_prolog_fusion", "ops-transformer-master", "ops-transformer-master/attention/mla_prolog_v3"
     if normalized in INDEX_SCATTER_TYPES:
         source_path = INDEX_SCATTER_SOURCE_PATHS.get(normalized, "ops-nn/index_or_ops-transformer/moe")
         source_repo = "ops-transformer-master" if source_path.startswith("ops-transformer-master") else "ops-nn"
@@ -367,11 +409,13 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
         missing.append("perm")
     if normalized in {"slice", "stridedsliced"}:
         missing.extend(["begin", "size_or_end", "stride"])
+    if normalized == "reversev2":
+        missing.append("dims")
     if normalized in {"concatd", "concatv2d", "splitvd", "pack", "unpack"}:
         missing.append("axis")
     if normalized == "tril":
         missing.append("diagonal")
-    if normalized in {"reducemax", "cumsum"}:
+    if normalized in {"reducemax", "reduceany", "argmaxwithvalue", "cumsum"}:
         missing.append("axis")
     if normalized == "tile":
         missing.append("multiples")
@@ -379,6 +423,10 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
         missing.append("fill_value")
     if normalized == "asstrided":
         missing.extend(["size", "stride", "storage_offset"])
+    if normalized.startswith("dynamicquant") and "dynamicquantupdate" not in normalized:
+        missing.extend(["dst_type", "quant_mode", "symmetry"])
+    if normalized == "mlaprologv3":
+        missing.extend(["tiling_key", "actual_seq_len_values", "cache_index_values"])
     if family == "index_scatter_routing":
         if normalized.startswith("moe"):
             missing.append("routing_values")
@@ -419,6 +467,8 @@ def infer_source_strategy(
             return "slice_move_align_or_nddma_missing_offsets" if missing_attrs else "slice_move_align_or_nddma"
         if normalized == "asstrided":
             return "as_strided_gather_or_move_align_missing_stride" if missing_attrs else "as_strided_gather_or_move_align"
+        if normalized == "reversev2":
+            return "reverse_simd_or_tensor_move_missing_dims" if missing_attrs else "reverse_simd_or_tensor_move"
         if normalized in {"concatd", "concatv2d"}:
             return "concat_axis_strategy_missing_axis" if missing_attrs else "concat_axis_strategy"
         if normalized == "splitvd":
@@ -444,7 +494,7 @@ def infer_source_strategy(
             return "elementwise_fill_vector_pipeline"
         if normalized == "range":
             return "range_output_generate"
-        if normalized == "rotarypositionembedding":
+        if normalized in {"rotarypositionembedding", "rotarymul"}:
             return "rotary_pos_embedding_vector_fusion"
         if input_elements and any(elems == 1 for elems in input_elements) and logical_elements > 1:
             return "elementwise_scalar_broadcast_vector_pipeline"
@@ -458,6 +508,8 @@ def infer_source_strategy(
             return "reduce_tree_with_scale"
         if normalized == "cumsum":
             return "prefix_scan_missing_axis" if missing_attrs else "prefix_scan"
+        if normalized == "argmaxwithvalue":
+            return "argmax_with_value_reduce_missing_axis" if missing_attrs else "argmax_with_value_reduce"
         return "reduce_tree"
     if family == "norm_activation":
         if normalized in {"swish", "gelu", "swiglu", "gegluv2", "dequantswigluquant"}:
@@ -471,6 +523,17 @@ def infer_source_strategy(
         if normalized == "groupnormsilu":
             return "groupnorm_reduce_silu"
         return "norm_activation_source_pending"
+    if family == "quant_vector_fusion":
+        if normalized.startswith("dynamicquant") and "dynamicquantupdate" not in normalized:
+            return "dynamic_quant_row_reduce_scale_quant"
+        if normalized in {
+            "addrmsnormdynamicquant",
+            "addrmsnormdynamicquantv2",
+            "multiaddrmsnormdynamicquant",
+        }:
+            return "add_rmsnorm_dynamic_quant_reduce_quant_fusion"
+    if family == "mla_prolog_fusion":
+        return "mla_prolog_v3_four_matmul_norm_rope_cache"
     if family == "index_scatter_routing":
         if normalized in {"gatherv2", "gatherv3", "gatherelements", "gatherelementsv2"}:
             return "gather_random_read_missing_indices"
@@ -520,3 +583,50 @@ def infer_layout_pattern(
     if input_shapes and output_shapes and input_shapes[0] == output_shapes[0]:
         return "shape_preserve"
     return "layout_transform"
+
+
+def row_count_from_last_dim(shape: list[int]) -> int:
+    if not shape:
+        return 0
+    if len(shape) == 1:
+        return 1
+    return num_elements(shape[:-1])
+
+
+def last_dim(shape: list[int]) -> int:
+    return shape[-1] if shape else 0
+
+
+def infer_dynamic_quant_rows(input_shapes: list[list[int]], output_shapes: list[list[int]]) -> tuple[int, int]:
+    data_shape = input_shapes[0] if input_shapes else []
+    rows = row_count_from_last_dim(data_shape)
+    hidden = last_dim(data_shape)
+    if output_shapes:
+        scale_shape = output_shapes[1] if len(output_shapes) > 1 else []
+        if scale_shape:
+            rows = max(rows, num_elements(scale_shape))
+    return rows, hidden
+
+
+def dynamic_quant_scale_elements(output_shapes: list[list[int]]) -> int:
+    return num_elements(output_shapes[1]) if len(output_shapes) > 1 else 0
+
+
+def infer_add_rms_norm_dims(input_shapes: list[list[int]], output_shapes: list[list[int]]) -> tuple[int, int]:
+    data_shape = input_shapes[0] if input_shapes else []
+    rows = row_count_from_last_dim(data_shape)
+    hidden = last_dim(data_shape)
+    if output_shapes:
+        x_shape = output_shapes[2] if len(output_shapes) > 2 else []
+        if x_shape:
+            rows = max(rows, row_count_from_last_dim(x_shape))
+            hidden = max(hidden, last_dim(x_shape))
+    return rows, hidden
+
+
+def count_present_output_shapes(output_shapes: list[list[int]]) -> int:
+    return sum(1 for shape in output_shapes if num_elements(shape) > 0)
+
+
+def aligned_vector_chunks(elements: int, chunk: int = 64) -> int:
+    return ceil_div(max(elements, 0), chunk)

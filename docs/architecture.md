@@ -88,6 +88,9 @@ profiling Type/Name
 | `source_repo` / `source_path` | 模型对齐的源码仓库和目录，例如 `ops-math/conversion/transpose`。 |
 | `source_strategy` | 源码策略标签，描述模型识别到的 kernel 逻辑路径，例如 `linear_ub_copy`、`reduce_tree`、`gather_random_read_missing_indices`。 |
 | `layout_pattern` | layout/memory 类算子的访问或转换模式，例如线性搬运、format transform、transpose、slice、多段 concat。 |
+| `quant_vector_fusion` | other_ops 中的动态量化或 norm+动态量化融合族，例如 `DynamicQuant`、`AddRmsNormDynamicQuant`。模型按源码中的逐行 reduce/scale/quant 和可选 smooth/gamma/beta pass 估计。 |
+| `mla_prolog_fusion` | `MlaPrologV3` 前处理融合族。模型按源码可见四个内部 matmul、norm/rope vector pass 和 active cache 写入估计；缺 `tiling_key/cache_index/actual_seq_len` 时为低置信。 |
+| `source_unavailable` | profiling Type 在当前源码快照中找不到可用 op_host/op_kernel 主实现，只能保留 unresolved 或遗留说明，不能靠样本误差反推模型。 |
 
 ### 结果与误差字段
 
@@ -101,6 +104,7 @@ profiling Type/Name
 | `duration_over_estimate` | `duration_us / estimated_us`。大于 1 表示低估，小于 1 表示高估。 |
 | `relative_error` | 相对误差统计字段，通常用于 summary 的 max/p95/p90/median。 |
 | routing bounds | GMM 在缺少真实 `group_list` 时输出的路由耗时区间，通常包括 balanced routing 和 extreme imbalance 两端。 |
+| `cube_compute_us` | 融合 kernel 内可见 Cube 子图的计算成本，当前用于 `MlaPrologV3` 等内部包含 matmul 的 other_ops。 |
 
 ### 诊断与限制
 
@@ -382,6 +386,7 @@ physical_lower_bound      -> ideal_lower_bound_us
 - `latency_floor_us`：decode、小序列或 QSFA 等 current-kernel 时延地板
 - `layout_overhead_us`：layout/transpose/slice/concat 等非连续访问、重排或多段搬运开销
 - `workspace_us`：workspace 读写或 partial merge 的 HBM 成本
+- `cube_compute_us`：other_ops 融合 kernel 内部可见 Cube 子图成本，例如 `MlaPrologV3` 的内部 matmul 子图
 
 字段语义：
 
@@ -581,7 +586,7 @@ CV：
 - 来源：`file`、`line`、`name`、`type`
 - 分类：`op_family`、`source_repo`、`source_path`、`source_strategy`、`layout_pattern`、`tiling_source`
 - 规模：`logical_elements`、`input_bytes`、`output_bytes`、`workspace_bytes`
-- 成本：`vector_compute_us`、`hbm_us`、`layout_overhead_us`、`sync_overhead_us`、`launch_overhead_us`
+- 成本：`vector_compute_us`、`cube_compute_us`、`hbm_us`、`layout_overhead_us`、`sync_overhead_us`、`launch_overhead_us`
 - 下界：`ideal_lower_bound_us`、`current_kernel_bound_us`
 - 结果：`estimated_us`、`residual_us`、`duration_over_estimate`
 - 诊断：`diagnosis`、`confidence`
@@ -599,6 +604,8 @@ unresolved 至少保留原始 shape/dtype/format、缺失 attrs 和 source looku
 - reduction/norm/activation source map 已细化到 `ops-math/math/reduce_*`、`ops-nn/activation/softmax_v2|gelu|swish`、`ops-nn/norm/rms_norm|layer_norm_v3|add_rms_norm|group_norm_silu` 等目录；报告区分 `reduce_tree`、`softmax_reduce_exp_sum_normalize`、`rmsnorm_reduce_scale`、`rmsnorm_residual_fusion`、`layernorm_mean_var_scale`、`activation_vector_pipeline` 等策略。
 - index/scatter/routing 已补充 `GatherElements`、`ScatterElementsV2`、`MaskedSelectV3`、`LinearIndex`、`NonZero` 分类和源码路径；报告区分 `gather_random_read_missing_indices`、`scatter_random_write_missing_indices`、`mask_compaction_missing_selected_count`、`linear_index_missing_indices`、`moe_routing_missing_token_distribution` 等低置信策略。
 - unresolved tail 已补充 `RotaryPositionEmbedding`、`Range`、`Conv2D` 分类：Rope 对齐 `ops-transformer-master/posembedding/rotary_position_embedding`，Range 对齐 `ops-math/math/range`，Conv2D 对齐常规 CV/Cube kernel 族。profiling 中 `MemSet` 行 shape/dtype/format 为 `N/A`，当前保持 unresolved。
+- transformer/vector fusion 已补充 `RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3` 分类和成本模型。`DynamicQuant` 对齐 `ops-nn/quant/dynamic_quant` 的行 reduce-scale-quant，`AddRmsNormDynamicQuant` 对齐 `ops-nn/norm/add_rms_norm_dynamic_quant` 的 add+rmsnorm+dynamic quant 融合，`MlaPrologV3` 对齐 `ops-transformer-master/attention/mla_prolog_v3` 的四个内部 matmul、norm/rope 和 active cache 写入。
+- reduction/layout 增量已补充 `ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。
 - `tools/other_ops_eval/api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
 - `tools/other_ops_eval/evaluator.py`：profiling CSV 读取、resolved/unresolved 报告、summary 输出。
 - `tools/op_eval/api.py` / `tools/op_eval/cli.py`：注册 `op_kind=other_ops`。
@@ -634,7 +641,7 @@ python3 tools/eval_ops.py --op-kind other_ops \
 
 剩余任务：
 
-1. 为 transformer/vector fusion 建独立设计：`RotaryMul`、`InterleaveRope`、`KvRmsNormRopeCache`、`MlaPrologV3`、`DynamicQuant`、`Rsqrt`。
+1. 为剩余 transformer/vector fusion 建独立设计：`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens`；`LightningIndexerQuant` 当前源码不可用，先作为遗留。
 2. 为 `Conv2D` 建立 `ops-nn/conv/conv2d_v2` 评估模型，按 Cube FLOPs、NC1HWC0/FRACTAL_Z storage、tiling、L0/L1/BT、bias/scale/fixpipe 拆分。
 3. 为 index/scatter 增加 bounds 语义；缺 indices 时输出可解释区间，而不是单点 overestimate。
 4. 若 profiling 能补 attrs，恢复 `Transpose/Slice/Pack/Tile/AsStrided/Concat` 的更精确 source replay。

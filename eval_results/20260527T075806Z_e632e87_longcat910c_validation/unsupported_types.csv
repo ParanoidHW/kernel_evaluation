@@ -1,9 +1,9 @@
 type,count,status,note
 FusedInferAttentionScore,140,parse_gap,"Attention rows with N/A input/output shapes; Type itself is supported when shapes are parseable"
 AutomaticBufferFusionOp,155,ignored_unestimable_fusion,"runtime fusion wrapper with non-fixed fusion pattern; cannot be directly evaluated from Type/shape alone"
-MlaPrologV3,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
-DynamicQuant,140,known_unsupported,"already tracked as transformer/vector fusion unresolved"
-AddRmsNormDynamicQuant,70,known_unsupported,"already tracked as transformer/vector fusion unresolved"
+MlaPrologV3,140,supported_stage4_low_confidence,"mapped to ops-transformer-master/attention/mla_prolog_v3; estimates four internal matmuls plus norm/rope/cache active writes; tiling_key/cache_index/actual_seq_len missing"
+DynamicQuant,140,supported_stage3,"mapped to ops-nn/quant/dynamic_quant row reduce-scale-quant path"
+AddRmsNormDynamicQuant,70,supported_stage3,"mapped to ops-nn/norm/add_rms_norm_dynamic_quant fused add+rmsnorm+dynamic quant path"
 Data,5,new_unsupported,"framework/data placeholder row not modeled as kernel cost"
 FloorDiv,20,supported_stage2,"mapped to ops-math/math/floor_div with expensive integer elementwise vector strategy"
 FloorMod,20,supported_stage2,"mapped to ops-math/math/floor_mod with expensive integer elementwise vector strategy"

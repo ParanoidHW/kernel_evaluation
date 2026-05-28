@@ -103,6 +103,7 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "aicore_time_us": row.get("aicore_time(us)", ""),
                     "aiv_time_us": row.get("aiv_time(us)", ""),
                     "vector_compute_us": cost.vector_compute_us,
+                    "cube_compute_us": cost.cube_compute_us,
                     "hbm_us": cost.hbm_us,
                     "layout_overhead_us": cost.layout_overhead_us,
                     "workspace_us": cost.workspace_us,

@@ -3,12 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .common import OtherOpSpec
+from op_eval.common import dtype_size, num_elements
+
+from .common import (
+    OtherOpSpec,
+    aligned_vector_chunks,
+    count_present_output_shapes,
+    dynamic_quant_scale_elements,
+    infer_add_rms_norm_dims,
+    infer_dynamic_quant_rows,
+    last_dim,
+)
 
 
 @dataclass(frozen=True)
 class OtherOpCostEstimate:
     vector_compute_us: float
+    cube_compute_us: float
     hbm_us: float
     layout_overhead_us: float
     workspace_us: float
@@ -34,6 +45,14 @@ def _other_ops_config(config: dict[str, Any]) -> dict[str, Any]:
         "activation_op_factor": float(model.get("activation_op_factor", 4.0)),
         "transcendental_op_factor": float(model.get("transcendental_op_factor", 16.0)),
         "index_random_access_factor": float(model.get("index_random_access_factor", 1.5)),
+        "dynamic_quant_passes": float(model.get("dynamic_quant_passes", 2.0)),
+        "dynamic_quant_op_factor": float(model.get("dynamic_quant_op_factor", 9.0)),
+        "dynamic_quant_min_row_us": float(model.get("dynamic_quant_min_row_us", 0.0)),
+        "add_rms_norm_dynamic_quant_passes": float(model.get("add_rms_norm_dynamic_quant_passes", 4.0)),
+        "add_rms_norm_dynamic_quant_op_factor": float(model.get("add_rms_norm_dynamic_quant_op_factor", 14.0)),
+        "mla_prolog_norm_rope_op_factor": float(model.get("mla_prolog_norm_rope_op_factor", 18.0)),
+        "mla_prolog_sync_points": float(model.get("mla_prolog_sync_points", 6.0)),
+        "mla_prolog_sync_us": float(model.get("mla_prolog_sync_us", 0.0)),
     }
 
 
@@ -61,7 +80,7 @@ def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
         return 0.5
     if normalized == "range":
         return 1.0
-    if normalized == "rotarypositionembedding":
+    if normalized in {"rotarypositionembedding", "rotarymul"}:
         return 6.0
     if normalized in {"cos", "sin"}:
         return cfg["transcendental_op_factor"]
@@ -86,6 +105,8 @@ def _reduction_passes(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
         return cfg["reduction_passes"] + 1.0
     if normalized == "cumsum":
         return cfg["reduction_passes"] + 1.0
+    if normalized == "argmaxwithvalue":
+        return cfg["reduction_passes"] + 1.0
     return cfg["reduction_passes"]
 
 
@@ -104,6 +125,141 @@ def _norm_activation_passes(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
     return cfg["norm_passes"]
 
 
+def _estimate_dynamic_quant(spec: OtherOpSpec, cfg: dict[str, Any]) -> tuple[float, float, float]:
+    rows, hidden = infer_dynamic_quant_rows(spec.input_shapes, spec.output_shapes)
+    data_elements = spec.input_elements[0] if spec.input_elements else spec.logical_elements
+    scale_elements = dynamic_quant_scale_elements(spec.output_shapes) or rows
+    has_smooth = len(spec.input_shapes) > 1 and last_dim(spec.input_shapes[1]) == hidden
+    y_bytes = spec.output_bytes[0] if spec.output_bytes else data_elements
+    scale_bytes = scale_elements * dtype_size("FLOAT")
+    x_bytes = spec.input_bytes[0] if spec.input_bytes else data_elements * 2
+    smooth_bytes = rows * hidden * dtype_size(spec.input_dtypes[1]) if has_smooth and len(spec.input_dtypes) > 1 else 0
+
+    passes = cfg["dynamic_quant_passes"]
+    traffic_bytes = x_bytes * passes + smooth_bytes * passes + y_bytes + scale_bytes
+    row_sync_us = rows * cfg["dynamic_quant_min_row_us"]
+    vf_chunks = aligned_vector_chunks(max(hidden, 1)) * max(rows, 1)
+    vector_ops = max(data_elements, vf_chunks * 64) * cfg["dynamic_quant_op_factor"]
+    return traffic_bytes, vector_ops, row_sync_us
+
+
+def _estimate_add_rms_norm_dynamic_quant(
+    spec: OtherOpSpec,
+    cfg: dict[str, Any],
+    hbm_bandwidth: float,
+) -> tuple[float, float, float]:
+    rows, hidden = infer_add_rms_norm_dims(spec.input_shapes, spec.output_shapes)
+    data_elements = max(rows * hidden, spec.logical_elements)
+    x_dtype_size = dtype_size(spec.input_dtypes[0]) if spec.input_dtypes else 2
+    y_dtype_size = dtype_size(spec.output_dtypes[0]) if spec.output_dtypes else 1
+    output_count = count_present_output_shapes(spec.output_shapes)
+    quant_output_count = 1
+    if len(spec.output_shapes) > 1 and len(spec.output_dtypes) > 1:
+        quant_output_count += int(num_elements(spec.output_shapes[1]) == data_elements)
+    quant_output_count = max(1, min(2, quant_output_count))
+
+    x1_x2_bytes = 2 * data_elements * x_dtype_size
+    x_out_bytes = data_elements * x_dtype_size
+    gamma_beta_bytes = hidden * x_dtype_size
+    if len(spec.input_shapes) > 3 and spec.input_shapes[3]:
+        gamma_beta_bytes += hidden * x_dtype_size
+    if len(spec.input_shapes) > 4 and spec.input_shapes[4]:
+        gamma_beta_bytes += hidden * x_dtype_size
+    if len(spec.input_shapes) > 5 and spec.input_shapes[5]:
+        gamma_beta_bytes += hidden * x_dtype_size
+
+    y_bytes = quant_output_count * data_elements * y_dtype_size
+    scale_bytes = quant_output_count * rows * dtype_size("FLOAT")
+    traffic_bytes = (
+        x1_x2_bytes
+        + x_out_bytes
+        + gamma_beta_bytes
+        + y_bytes
+        + scale_bytes
+        + data_elements * x_dtype_size * max(0.0, cfg["add_rms_norm_dynamic_quant_passes"] - 2.0)
+    )
+    vector_ops = data_elements * cfg["add_rms_norm_dynamic_quant_op_factor"] * max(1, quant_output_count)
+    workspace_us = _bytes_to_us(max(0, output_count - 3) * rows * dtype_size("FLOAT"), hbm_bandwidth)
+    return traffic_bytes, vector_ops, workspace_us
+
+
+def _nz_weight_dims(shape: list[int]) -> tuple[int, int] | None:
+    if len(shape) < 4:
+        return None
+    n_dim = shape[-4] * shape[-1]
+    k_dim = shape[-3] * shape[-2]
+    return k_dim, n_dim
+
+
+def _matmul_us(m: int, n: int, k: int, dtype: str, config: dict[str, Any]) -> float:
+    if m <= 0 or n <= 0 or k <= 0:
+        return 0.0
+    dtype_key = "INT8" if dtype.upper() in {"INT8", "DT_INT8"} else "DT_BF16"
+    peak = float(config.get("peak_tflops", {}).get(dtype_key, config.get("peak_tflops", {}).get("DT_BF16", 1.0)))
+    if dtype_key == "INT8":
+        peak = float(config.get("quant_matmul", {}).get("peak_tops", {}).get("INT8", peak))
+    flops = 2.0 * m * n * k
+    return flops / max(peak * 1_000_000.0, 1e-9)
+
+
+def _estimate_mla_prolog(spec: OtherOpSpec, cfg: dict[str, Any], config: dict[str, Any], hbm_bandwidth: float) -> tuple[float, float, float, float]:
+    shapes = spec.input_shapes
+    out_shapes = spec.output_shapes
+    x_shape = shapes[0] if shapes else []
+    bs = x_shape[0] if len(x_shape) >= 2 else max(num_elements(out_shapes[0][:-1]) if out_shapes else 1, 1)
+    hidden_x = x_shape[-1] if x_shape else 0
+
+    weight_dq = _nz_weight_dims(shapes[1]) if len(shapes) > 1 else None
+    weight_uq_qr = _nz_weight_dims(shapes[2]) if len(shapes) > 2 else None
+    weight_uk = (shapes[3][0], shapes[3][-1]) if len(shapes) > 3 and len(shapes[3]) >= 2 else None
+    weight_dkv_kr = _nz_weight_dims(shapes[4]) if len(shapes) > 4 else None
+
+    cq_dim = weight_dq[1] if weight_dq else 0
+    qcqr_dim = weight_uq_qr[1] if weight_uq_qr else 0
+    qn_k = weight_uk[0] if weight_uk else 0
+    qn_dim = weight_uk[1] if weight_uk else (out_shapes[0][-1] if out_shapes else 0)
+    ckvkr_dim = weight_dkv_kr[1] if weight_dkv_kr else 0
+    kv_dim = last_dim(out_shapes[2]) if len(out_shapes) > 2 else 0
+    rope_dim = last_dim(out_shapes[1]) if len(out_shapes) > 1 else 0
+
+    x_dtype = spec.input_dtypes[0] if spec.input_dtypes else "DT_BF16"
+    w_dq_dtype = spec.input_dtypes[1] if len(spec.input_dtypes) > 1 else x_dtype
+    w_uq_dtype = spec.input_dtypes[2] if len(spec.input_dtypes) > 2 else x_dtype
+    w_dkv_dtype = spec.input_dtypes[4] if len(spec.input_dtypes) > 4 else x_dtype
+    compute_dtype_dq = "INT8" if w_dq_dtype.upper() in {"INT8", "DT_INT8"} else "DT_BF16"
+    compute_dtype_uq = "INT8" if w_uq_dtype.upper() in {"INT8", "DT_INT8"} else "DT_BF16"
+    compute_dtype_dkv = "INT8" if w_dkv_dtype.upper() in {"INT8", "DT_INT8"} else "DT_BF16"
+
+    matmul_us = 0.0
+    matmul_us += _matmul_us(bs, cq_dim, hidden_x, compute_dtype_dq, config)
+    matmul_us += _matmul_us(bs, ckvkr_dim, hidden_x, compute_dtype_dkv, config)
+    matmul_us += _matmul_us(bs, qcqr_dim, max(cq_dim, 1), compute_dtype_uq, config)
+    matmul_us += _matmul_us(bs, qn_dim, max(qn_k, 1), "DT_BF16", config)
+
+    active_cache_bytes = 0
+    if len(out_shapes) > 2:
+        active_cache_bytes += bs * max(kv_dim, 0) * dtype_size(spec.output_dtypes[2] if len(spec.output_dtypes) > 2 else "DT_BF16")
+    if len(out_shapes) > 3:
+        active_cache_bytes += bs * max(rope_dim, 0) * dtype_size(spec.output_dtypes[3] if len(spec.output_dtypes) > 3 else "DT_BF16")
+    output_bytes = 0
+    for index, out_shape in enumerate(out_shapes):
+        elems = num_elements(out_shape)
+        if index in {2, 3}:
+            continue
+        output_bytes += elems * dtype_size(spec.output_dtypes[index] if index < len(spec.output_dtypes) else "DT_BF16")
+    input_bytes = spec.input_bytes[0] if spec.input_bytes else 0
+    input_bytes += sum(spec.input_bytes[5:9])
+    if len(spec.input_bytes) > 11:
+        input_bytes += spec.input_bytes[11]
+    weight_stream_bytes = sum(spec.input_bytes[index] for index in (1, 2, 3, 4) if index < len(spec.input_bytes))
+    traffic_bytes = input_bytes + weight_stream_bytes + output_bytes + active_cache_bytes
+
+    vector_elements = bs * (max(cq_dim, 0) + max(ckvkr_dim, 0) + max(qcqr_dim, 0) + max(rope_dim, 0))
+    vector_ops = vector_elements * cfg["mla_prolog_norm_rope_op_factor"]
+    sync_us = cfg["mla_prolog_sync_points"] * cfg["mla_prolog_sync_us"]
+    return traffic_bytes, vector_ops, matmul_us, sync_us
+
+
 def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostEstimate:
     cfg = _other_ops_config(config)
     hbm_bandwidth = float(config.get("hbm_bandwidth_tbps", 1.0))
@@ -113,6 +269,7 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
     vector_ops = float(spec.logical_elements)
     layout_overhead_us = 0.0
     workspace_us = 0.0
+    cube_compute_us = 0.0
     sync_overhead_us = 0.0
     tiling_source = "analytic_fallback"
 
@@ -153,6 +310,18 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
             passes = _norm_activation_passes(spec, cfg)
             traffic_bytes = (input_bytes + output_bytes) * passes
             vector_ops = float(spec.logical_elements) * cfg["activation_op_factor"]
+    elif spec.op_family == "quant_vector_fusion":
+        normalized = spec.op_type.replace("_", "").replace("-", "").lower()
+        tiling_source = "source_strategy_replay_missing_attrs" if spec.missing_attrs else "source_strategy_replay"
+        if normalized.startswith("dynamicquant") and "dynamicquantupdate" not in normalized:
+            traffic_bytes, vector_ops, sync_overhead_us = _estimate_dynamic_quant(spec, cfg)
+        else:
+            traffic_bytes, vector_ops, workspace_us = _estimate_add_rms_norm_dynamic_quant(spec, cfg, hbm_bandwidth)
+    elif spec.op_family == "mla_prolog_fusion":
+        tiling_source = "source_strategy_replay_missing_runtime_values"
+        traffic_bytes, vector_ops, cube_compute_us, sync_overhead_us = _estimate_mla_prolog(
+            spec, cfg, config, hbm_bandwidth
+        )
     elif spec.op_family == "index_scatter_routing":
         tiling_source = "analytic_fallback_missing_runtime_values"
         traffic_bytes = (input_bytes + output_bytes) * cfg["index_random_access_factor"]
@@ -164,17 +333,22 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
 
     hbm_us = _bytes_to_us(traffic_bytes, hbm_bandwidth)
     vector_compute_us = _ops_to_us(vector_ops, cfg["vector_gops"])
-    body_us = max(vector_compute_us, hbm_us) + layout_overhead_us + workspace_us + sync_overhead_us
+    body_us = max(vector_compute_us, hbm_us) + cube_compute_us + layout_overhead_us + workspace_us + sync_overhead_us
     launch_us = cfg["launch_overhead_us"]
     total_us = body_us + launch_us
-    ideal_lower_bound_us = max(_bytes_to_us(input_bytes + output_bytes, hbm_bandwidth), vector_compute_us)
-    dominant = "hbm" if hbm_us >= vector_compute_us else "vector"
-    if layout_overhead_us > max(hbm_us, vector_compute_us):
+    ideal_lower_bound_us = max(_bytes_to_us(input_bytes + output_bytes, hbm_bandwidth), vector_compute_us, cube_compute_us)
+    dominant_base = max(hbm_us, vector_compute_us, cube_compute_us)
+    if cube_compute_us >= hbm_us and cube_compute_us >= vector_compute_us:
+        dominant = "cube"
+    else:
+        dominant = "hbm" if hbm_us >= vector_compute_us else "vector"
+    if layout_overhead_us > dominant_base:
         dominant = "layout"
-    if workspace_us > max(hbm_us, vector_compute_us, layout_overhead_us):
+    if workspace_us > max(hbm_us, vector_compute_us, cube_compute_us, layout_overhead_us):
         dominant = "workspace"
     return OtherOpCostEstimate(
         vector_compute_us=vector_compute_us,
+        cube_compute_us=cube_compute_us,
         hbm_us=hbm_us,
         layout_overhead_us=layout_overhead_us,
         workspace_us=workspace_us,

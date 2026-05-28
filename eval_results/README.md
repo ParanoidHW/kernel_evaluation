@@ -63,16 +63,22 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 | `longcat_910c_matmul` | 695 | 0 | 3.797 | 3.547 | 0.749 | 2.080 | `QuantBatchMatmulV3` Weight-NZ/small-M 高估 |
 | `longcat_910c_grouped_matmul` | 140 | 0 | 14.072 | 5.481 | 2.250 | 0.308 | GMM 单点均值高估，且出现 below-bound/min-bound 问题 |
 | `longcat_910c_attention` | 140 | 140 | 3.362 | 3.249 | 3.119 | 0.243 | `FusedInferAttentionScore` PA-NZ cache 仍高估 |
-| `longcat_910c_other_ops` | 1860 | 510 | 374.256 | 1.128 | 0.515 | 1.189 | `GatherV2` 缺 indices 的低置信 fallback |
+| `longcat_910c_other_ops` | 2210 | 160 | 374.256 | 1.083 | 0.510 | 1.404 | `GatherV2` 缺 indices 的低置信 fallback |
 
 不支持评估 Type：
 
 - 忽略项：`AutomaticBufferFusionOp`，它是非固定 pattern 融合算子，无法直接评估。
-- 已知 unsupported：`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`。
+- 已在 stage3/stage4 支持：`MlaPrologV3`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`RotaryMul`、`ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。
 - 已在 stage2 支持：`FloorDiv`、`FloorMod`、`ReduceMax`、`GatherElementsV2`、`Maximum`、`Cumsum`、`Tril`、`LogicalNot`、`Unpack`。
-- 新增 unsupported：`Data`。
+- 剩余 unresolved：`Data` 是框架占位行，不建模为 kernel 成本。
 - 解析缺口：`FusedInferAttentionScore` 有 140 行 shape 为 `N/A`，Type 本身已支持，但这些行无法解析为 Attention spec。
 - stage3 Attention 修复：已将可解析 FIA PA-NZ cache 从 `B=161,Sq=8,Sk=128` 修正为 `B=4,Sq=8,Sk=5120`，并区分 PA short-prefill template。剩余高估需要 runtime block table/actualSeqLengths。
+
+2026-05-28 增量验证：
+
+- longcat 910C other_ops：resolved `2210`，unresolved `160`；unresolved 只剩 `AutomaticBufferFusionOp` 155 行和 `Data` 5 行。`AutomaticBufferFusionOp` 按用户确认作为非固定融合包装忽略，`Data` 是框架占位。
+- ds3.2 910C other_ops：resolved `3680`，unresolved `170`；unresolved 为 `LightningIndexerQuant` 90 行、`Data` 40 行、`AutomaticBufferFusionOp` 40 行。`LightningIndexerQuant` 在当前源码快照中未找到 op_host/op_kernel 主实现，仅有 experimental 示例，降级为 `source_unavailable` 遗留。
+- 两组 top tail 仍是 `GatherV2` 缺 indices 导致的低置信 fallback；当前不调整随机访问因子来拟合。
 
 ## 最新增量快照
 

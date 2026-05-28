@@ -195,6 +195,9 @@ GMM 当前最大约 18% above-bound：
 - Attention 当前最大已知残留不再是 QSFA parser，而是 gemma/base 910B4 FIA decode 与 QSFA exact replay 深度不足。
 - MatMul 当前已无具备足够信息支撑继续完成的活动 TODO；base `MatMulV2 M=1` 和 ds3.2 `TransposeBatchMatMul` 均已降级为遗留。
 - GMM 应继续使用 routing-bound 口径；没有真实 group runtime 数据前，不应按普通 MatMul 单点误差做结论。
+- 910C longcat `QuantBatchMatmulV3 M=4,N=12288,K=3072` 已检查源码和 ds3.2 对照样本。源码可见的量化 epilogue、L2 tile、`usedCoreNum` 和 block 循环不足以解释该样本与 ds3.2 full_quant 样本的差异；profiling 缺 exact `baseN/singleCoreN/tileL2cache/template key`。当前不改模型，记录为遗留。
+- other_ops 本轮已补充 `DynamicQuant`、`AddRmsNormDynamicQuant`、`RotaryMul`、`MlaPrologV3`、`ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。longcat 910C other_ops resolved `2210`、unresolved `160`；ds3.2 other_ops resolved `3680`、unresolved `170`。新增未支持项中 `LightningIndexerQuant` 缺 op_host/op_kernel 主实现，`Data` 是框架占位，`AutomaticBufferFusionOp` 为用户确认的非固定融合包装，均不再作为当前活动建模 TODO。
+- other_ops top tail 仍是 `GatherV2` 缺 indices。由于 profiling 没有 indices 实际访问范围，当前单点 fallback 可能明显高估；后续应改成 bounds 语义，而不是调小随机访问因子拟合。
 
 ## 遗留清单
 
@@ -203,5 +206,9 @@ GMM 当前最大约 18% above-bound：
 3. GMM above-bound：需要真实 `group_list`、`groupListType`、`tuningConfigOptional`、per-expert token 分布或 exact tiling 输出。
 4. QSFA exact replay：需要 block table 实际值、sparse indices、runtime topK 行为或 exact host tiling。
 5. ds3.2 `TransposeBatchMatMul M=4,N=128,K=512,batch=128`：需要 perm attrs、exact tiling 或更细硬件计数器后再恢复建模。
+6. 910C longcat `QuantBatchMatmulV3 M=4,N=12288,K=3072`：需要 exact quant tiling、template key、L2 tile 参数或更细分的 MTE/fixpipe 计数器后再恢复。
+7. other_ops `GatherV2/GatherElements/Scatter`：需要 indices 实际分布或 selected count；当前只能 low-confidence fallback，建议后续改为 bounds。
+8. other_ops `LightningIndexerQuant`：当前源码快照只找到 experimental 示例，缺少可用主实现；等待源码或运行时语义补齐。
+9. other_ops `DynamicQuant/RotaryMul/MlaPrologV3`：已支持但仍为 source-strategy 级别；小 kernel 固定开销、`tiling_key/cache_index/actual_seq_len` 等 runtime 信息缺失前不继续加校准项。
 
 在上述输入补齐前，当前不再维护活动建模 TODO，避免为了拟合个别残差引入无关旋钮。

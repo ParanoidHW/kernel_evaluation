@@ -391,6 +391,60 @@ workspace_us = output_bytes / hbm_bandwidth
 vector_ops = sum(input_elements) * passes
 ```
 
+### quant/vector fusion
+
+DynamicQuant：
+
+```text
+rows, hidden = data_shape[:-1], data_shape[-1]
+traffic_bytes = x_read * dynamic_quant_passes + smooth_read * passes + y_write + scale_write
+vector_ops = max(data_elements, aligned_64(hidden) * rows) * dynamic_quant_op_factor
+tiling_source = source_strategy_replay_missing_attrs
+```
+
+源码依据：
+
+- `ops-nn/quant/dynamic_quant/op_kernel/arch35/dynamic_quant_regbase_full_load.h`
+- kernel 对每行做 reduce max / scale 计算，再写 quant 后的 `y` 和 scale；若存在 smooth 输入，则 smooth 也进入逐元素 pass。
+
+AddRmsNormDynamicQuant：
+
+```text
+traffic_bytes = x1_read + x2_read + x_write + gamma/beta/smooth + quant_outputs + scale_outputs
+vector_ops = rows * hidden * add_rms_norm_dynamic_quant_op_factor * quant_output_count
+workspace_us = optional_extra_scale_workspace / hbm_bandwidth
+```
+
+源码依据：
+
+- `ops-nn/norm/add_rms_norm_dynamic_quant/op_kernel/arch35/add_rms_norm_dynamic_quant_regbase.h`
+- `ops-nn/norm/add_rms_norm_dynamic_quant/op_kernel/arch35/add_rms_norm_dynamic_quant_common.h`
+
+模型表达 fused add、RMS reduce/rstd、gamma/beta/smooth、dynamic quant 输出和 scale 输出。当前 profiling 不包含 `dst_type`、`quant_mode`、`symmetry` 等 attrs，报告保留低置信标记，但不引入按样本拟合项。
+
+### mla_prolog_fusion
+
+`MlaPrologV3` 是 transformer 前处理融合 kernel，不应按单个 vector op 估计。当前模型把它拆成源码可见的四个 Cube 子图和 vector/cache 子图：
+
+```text
+cube_compute_us =
+  MatmulCq(x, w_dq)
+  + MatmulCkvKr(x, w_dkv_kr)
+  + MatmulQcQr(cq, w_uq_qr)
+  + MatmulQn(qc, w_uk)
+
+traffic_bytes = x + weights + norm/rope inputs + active outputs + active cache writes
+vector_ops = bs * (cq_dim + ckvkr_dim + qcqr_dim + rope_dim) * mla_prolog_norm_rope_op_factor
+body_us = max(hbm_us, vector_compute_us) + cube_compute_us + sync_overhead_us
+```
+
+源码依据：
+
+- `ops-transformer-master/attention/mla_prolog_v3/docs/MlaPrologV3算子设计介绍.md`
+- `ops-transformer-master/attention/mla_prolog_v3/op_kernel/mla_prolog_v3.cpp`
+
+报告中 `cube_compute_us` 表示融合 kernel 内部 Cube matmul 子图成本；`workspace_us` 仍只表示 workspace/partial merge HBM 成本。当前 profiling 缺 `tiling_key`、`actual_seq_len_values`、`cache_index_values`，cache 写入只能按 active `bs * dim` 估计，置信度为 low。
+
 ### norm/activation
 
 Activation-only：
@@ -437,7 +491,7 @@ op_family,source_repo,source_path,source_strategy,layout_pattern,tiling_source,m
 input_shapes,output_shapes,input_dtypes,output_dtypes,input_formats,output_formats
 input_elements,output_elements,input_bytes,output_bytes,logical_elements
 block_dim,mix_block_dim,aicore_time_us,aiv_time_us
-vector_compute_us,hbm_us,layout_overhead_us,workspace_us,sync_overhead_us,launch_overhead_us
+vector_compute_us,cube_compute_us,hbm_us,layout_overhead_us,workspace_us,sync_overhead_us,launch_overhead_us
 current_kernel_bound_us,ideal_lower_bound_us,estimated_us,total_us
 duration_us,residual_us,duration_over_estimate
 bottleneck,diagnosis,confidence
@@ -475,13 +529,14 @@ file,line,type,name,reason,input_shapes,output_shapes,input_dtypes,output_dtypes
 - `Gather/Scatter/TopK/MoE`：缺 indices、selected count、routing/token 分布，当前只能 low-confidence fallback。
 - `Pack/Slice/Transpose/AsStrided/Concat/Tile`：缺 axis、offset、stride、multiples 等 attrs，不能 exact replay。
 - `Conv2D`：已分类为 `cv_regular`，但当前没有 Cube tiling/BT/fixpipe 模型。
-- 模型样本 unresolved：`RotaryMul`、`DynamicQuant`、`Rsqrt`、`MlaPrologV3`、`LightningIndexerQuant`、`InterleaveRope`、`KvRmsNormRopeCache`、`MoeComputeExpertTokens` 等需要下一轮 transformer/vector fusion 设计。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
+- 已新增覆盖：`RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3`、`ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。
+- 模型样本剩余 unresolved：`LightningIndexerQuant`、`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens` 等。`LightningIndexerQuant` 当前源码快照只找到 experimental 示例，未找到 op_host/op_kernel 主实现，先标记为 `source_unavailable` 遗留。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
 - 910C longcat stage2 已补充 `FloorDiv`、`FloorMod`、`ReduceMax`、`GatherElementsV2`、`Maximum`、`Cumsum`、`Tril`、`LogicalNot`、`Unpack`。其中 `GatherElementsV2/Cumsum/Tril/Unpack` 仍因缺 indices、axis 或 diagonal 等 attrs 标为低置信。
 
 ## 后续任务
 
-1. 为 transformer/vector fusion 建独立设计：`RotaryMul`、`InterleaveRope`、`KvRmsNormRopeCache`、`MlaPrologV3`、`DynamicQuant`、`Rsqrt`。
+1. 为仍有源码路径的 transformer/vector fusion 建独立设计：`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens`。
 2. 为 `Conv2D` 建立 `ops-nn/conv/conv2d_v2` 评估模型，按 Cube FLOPs、NC1HWC0/FRACTAL_Z storage、tiling、L0/L1/BT、bias/scale/fixpipe 拆分。
 3. 为 index/scatter 增加 bounds 语义：在缺 indices 时输出 min/max，而不是单点 overestimate。
 4. 若 profiling 能补 attrs，恢复 `Transpose/Slice/Pack/Tile/AsStrided/Concat` 的更精确 source replay。
-5. 把 `tools/annotate_profiling.py` 扩展为调用 `other_ops`，让非 MatMul/GMM/Attention 的已支持 Type 也能写入 `kernel_eval_value`。
+5. `LightningIndexerQuant` 等源码不可用 Type 等待源码或运行时语义补齐后再恢复建模。

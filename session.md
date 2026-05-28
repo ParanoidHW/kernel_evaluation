@@ -690,3 +690,52 @@ stage2 后 `other_ops` resolved 从 `1740` 增加到 `1860`，unresolved 从 `63
 - `AutomaticBufferFusionOp` 从后续 transformer/vector fusion 建模 TODO 中移除。
 - 在 `eval_results/20260527T075806Z_e632e87_longcat910c_validation/unsupported_types.csv` 中改为 `ignored_unestimable_fusion`。
 - 文档中保留其 unresolved 统计背景，但不再把它视为需要补模型的 unsupported Type。
+
+## 2026-05-28 other_ops transformer/vector fusion 增量
+
+本轮继续按 source/tiling 逻辑处理剩余 other_ops TODO，不引入无关拟合项。
+
+新增代码覆盖：
+
+- `DynamicQuant` / `DynamicQuantV*`：对齐 `ops-nn/quant/dynamic_quant`，按逐行 reduce max、scale、quant 输出和可选 smooth pass 估计。
+- `AddRmsNormDynamicQuant` / `AddRmsNormDynamicQuantV2`：对齐 `ops-nn/norm/add_rms_norm_dynamic_quant`，按 add、RMS reduce/rstd、gamma/beta/smooth、quant 输出和 scale 输出估计。
+- `RotaryMul`：对齐 `ops-transformer-master/posembedding/apply_rotary_pos_emb`，归入 elementwise/vector rope fusion。
+- `MlaPrologV3`：对齐 `ops-transformer-master/attention/mla_prolog_v3`，按四个内部 matmul、norm/rope vector pass 和 active cache 写入估计；报告新增 `cube_compute_us` 字段承载融合 kernel 内部 Cube 子图成本。
+- `ReverseV2`、`ReduceAny`、`ArgMaxWithValue`：补入 layout/reduction 分类和源码路径。
+
+验证命令：
+
+```bash
+python3 -m compileall tools
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C/longcat_kernel_details.csv --config configs/ascend_910c.json --output /tmp/longcat_910c_other_ops_final.csv --unresolved-output /tmp/longcat_910c_other_ops_final_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --output /tmp/ds32_other_ops_stage6.csv --unresolved-output /tmp/ds32_other_ops_stage6_unresolved.csv
+python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/longcat_910c_other_ops_final.csv
+python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /tmp/ds32_other_ops_stage6.csv
+```
+
+验证结果：
+
+- longcat 910C other_ops：resolved `2210`，unresolved `160`；relative error max `374.2560`，p95 `1.0833`，p90 `0.9232`，median `0.5095`，duration/estimate median `1.4044`。unresolved 只剩 `AutomaticBufferFusionOp` 155 行和 `Data` 5 行。
+- ds3.2 other_ops：resolved `3680`，unresolved `170`；relative error max `16.6354`，p95 `1.4422`，p90 `0.8877`，median `0.6322`，duration/estimate median `1.4200`。unresolved 为 `LightningIndexerQuant` 90 行、`Data` 40 行、`AutomaticBufferFusionOp` 40 行。
+
+新识别问题和处理结论：
+
+- `GatherV2` 仍是两组最大 tail。profiling 缺 indices 实际访问范围，当前 low-confidence 单点 fallback 会高估；后续应输出 bounds，而不是调小随机访问因子拟合。
+- `LightningIndexerQuant` 当前源码快照只找到 experimental 示例，未找到 op_host/op_kernel 主实现，降级为 `source_unavailable` 遗留。
+- `DynamicQuant`、`RotaryMul` 小 shape 样本仍存在固定开销残留，但缺少 tiling/runtime 证据，不加 per-op 校准项。
+- `MlaPrologV3` 已能估计内部 matmul 和 active cache 写入，但缺 `tiling_key`、`cache_index`、`actual_seq_len`，置信度保持 low。
+
+## 2026-05-28 QuantBatchMatmulV3 longcat 残留审计
+
+针对 longcat 910C `QuantBatchMatmulV3 M=4,N=12288,K=3072` 高估问题，已对照 ds3.2 full_quant 样本和 `ops-nn/matmul/quant_batch_matmul_v3` 源码检查。
+
+源码观察：
+
+- BF16 dequant 路径通过 `blockIdx` 映射 `mDim/nDim`，每 core 循环 `nLoops`。
+- INT32/full_quant 路径使用 `usedCoreNum`、`mTileCntL2/nTileCntL2`、`realRound_` 等 L2 tile 和 block 循环。
+- ds3.2 `M=4,N=4096/36864,K=7168` full_quant 样本在现有量化 epilogue 模型下表现合理；直接降低 longcat epilogue 项会破坏这些样本。
+
+结论：
+
+- 当前 profiling 缺 exact `baseN/singleCoreN/tileL2cache/template key`，无法解释 longcat 与 ds3.2 full_quant 的分支差异。
+- 不修改模型，不引入针对 longcat 形状的校准项；该问题记录为遗留，后续需要 exact quant tiling 或更细 MTE/fixpipe 计数器后再恢复。
