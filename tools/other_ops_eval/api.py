@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from op_eval.common import dtype_size, num_elements
+from op_eval.common import ceil_div, dtype_size, num_elements
 
 from .common import (
     OtherOpSpec,
@@ -53,6 +53,9 @@ def _other_ops_config(config: dict[str, Any]) -> dict[str, Any]:
         "mla_prolog_norm_rope_op_factor": float(model.get("mla_prolog_norm_rope_op_factor", 18.0)),
         "mla_prolog_sync_points": float(model.get("mla_prolog_sync_points", 6.0)),
         "mla_prolog_sync_us": float(model.get("mla_prolog_sync_us", 0.0)),
+        "quant_lightning_indexer_topk_op_factor": float(model.get("quant_lightning_indexer_topk_op_factor", 32.0)),
+        "quant_lightning_indexer_sync_points": float(model.get("quant_lightning_indexer_sync_points", 4.0)),
+        "quant_lightning_indexer_sync_us": float(model.get("quant_lightning_indexer_sync_us", 0.0)),
     }
 
 
@@ -260,6 +263,77 @@ def _estimate_mla_prolog(spec: OtherOpSpec, cfg: dict[str, Any], config: dict[st
     return traffic_bytes, vector_ops, matmul_us, sync_us
 
 
+def _estimate_quant_lightning_indexer(
+    spec: OtherOpSpec,
+    cfg: dict[str, Any],
+    config: dict[str, Any],
+    hbm_bandwidth: float,
+) -> tuple[float, float, float, float, float]:
+    q_shape = spec.input_shapes[0] if spec.input_shapes else []
+    k_shape = spec.input_shapes[1] if len(spec.input_shapes) > 1 else []
+    out_shape = spec.output_shapes[0] if spec.output_shapes else []
+
+    if len(q_shape) == 4:
+        batch = q_shape[0]
+        q_seq = q_shape[1]
+        q_heads = q_shape[2]
+        head_dim = q_shape[3]
+        q_tokens = batch * q_seq
+    elif len(q_shape) == 3:
+        q_tokens = q_shape[0]
+        q_heads = q_shape[1]
+        head_dim = q_shape[2]
+        batch = spec.input_shapes[7][0] if len(spec.input_shapes) > 7 and spec.input_shapes[7] else 1
+        q_seq = max(1, q_tokens // max(batch, 1))
+    else:
+        q_tokens = max(num_elements(q_shape[:-1]), 1)
+        q_heads = 1
+        head_dim = last_dim(q_shape) or 128
+        batch = 1
+        q_seq = q_tokens
+
+    if len(k_shape) == 4:
+        block_num, block_size, kv_heads, k_head_dim = k_shape
+        kv_seq = block_num * block_size
+    elif len(k_shape) >= 3:
+        kv_seq = k_shape[0]
+        kv_heads = k_shape[1]
+        block_size = 0
+        k_head_dim = last_dim(k_shape)
+    else:
+        kv_seq = max(num_elements(k_shape[:-1]), 1)
+        kv_heads = 1
+        block_size = 0
+        k_head_dim = head_dim
+
+    if len(spec.input_shapes) > 7 and len(spec.input_shapes[7]) >= 2 and block_size > 0:
+        kv_seq = max(kv_seq, spec.input_shapes[7][1] * block_size)
+    if len(out_shape) >= 3:
+        sparse_count = out_shape[-1]
+        kv_heads = max(kv_heads, out_shape[-2])
+    else:
+        sparse_count = 2048
+
+    qk_ops = 2.0 * max(q_tokens, 1) * max(kv_heads, 1) * max(kv_seq, 1) * max(k_head_dim or head_dim, 1)
+    peak = float(config.get("quant_matmul", {}).get("peak_tops", {}).get("INT8", config.get("peak_tflops", {}).get("INT8", 1.0)))
+    cube_compute_us = qk_ops / max(peak * 1_000_000.0, 1e-9)
+
+    s2_base = 128
+    aligned_kv = ceil_div(max(kv_seq, 1), s2_base) * s2_base
+    score_workspace_bytes = max(q_tokens, 1) * max(kv_heads, 1) * aligned_kv * dtype_size("FLOAT16")
+    topk_workspace_bytes = max(q_tokens, 1) * max(kv_heads, 1) * max(sparse_count, 1) * 2 * dtype_size("INT32")
+    traffic_bytes = sum(spec.input_bytes) + sum(spec.output_bytes) + score_workspace_bytes + topk_workspace_bytes
+    vector_ops = (
+        max(q_tokens, 1)
+        * max(kv_heads, 1)
+        * (aligned_kv + max(sparse_count, 1) * max(ceil_div(aligned_kv, s2_base), 1))
+        * cfg["quant_lightning_indexer_topk_op_factor"]
+    )
+    workspace_us = _bytes_to_us(score_workspace_bytes + topk_workspace_bytes, hbm_bandwidth)
+    sync_us = cfg["quant_lightning_indexer_sync_points"] * cfg["quant_lightning_indexer_sync_us"]
+    return traffic_bytes, vector_ops, cube_compute_us, workspace_us, sync_us
+
+
 def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostEstimate:
     cfg = _other_ops_config(config)
     hbm_bandwidth = float(config.get("hbm_bandwidth_tbps", 1.0))
@@ -320,6 +394,11 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
     elif spec.op_family == "mla_prolog_fusion":
         tiling_source = "source_strategy_replay_missing_runtime_values"
         traffic_bytes, vector_ops, cube_compute_us, sync_overhead_us = _estimate_mla_prolog(
+            spec, cfg, config, hbm_bandwidth
+        )
+    elif spec.op_family == "lightning_indexer_fusion":
+        tiling_source = "source_strategy_replay_missing_runtime_values"
+        traffic_bytes, vector_ops, cube_compute_us, workspace_us, sync_overhead_us = _estimate_quant_lightning_indexer(
             spec, cfg, config, hbm_bandwidth
         )
     elif spec.op_family == "index_scatter_routing":

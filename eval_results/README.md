@@ -77,7 +77,7 @@ python3 tools/summarize_eval_results.py <report.csv> [...]
 2026-05-28 增量验证：
 
 - longcat 910C other_ops：resolved `2210`，unresolved `160`；unresolved 只剩 `AutomaticBufferFusionOp` 155 行和 `Data` 5 行。`AutomaticBufferFusionOp` 按用户确认作为非固定融合包装忽略，`Data` 是框架占位。
-- ds3.2 910C other_ops：resolved `3680`，unresolved `170`；unresolved 为 `LightningIndexerQuant` 90 行、`Data` 40 行、`AutomaticBufferFusionOp` 40 行。`LightningIndexerQuant` 在当前源码快照中未找到 op_host/op_kernel 主实现，仅有 experimental 示例，降级为 `source_unavailable` 遗留。
+- ds3.2 910C other_ops：默认 Type alias 开启后 resolved `3770`，unresolved `80`；unresolved 为 `Data` 40 行、`AutomaticBufferFusionOp` 40 行。`LightningIndexerQuant` 90 行通过评估入口 alias 映射到 `QuantLightningIndexer`，源码路径为 `ops-transformer-master/attention/quant_lightning_indexer`。使用 `--disable-type-aliases` 时会回到 resolved `3680`、unresolved `170`，便于验证映射影响。
 - 两组 top tail 仍是 `GatherV2` 缺 indices 导致的低置信 fallback；当前不调整随机访问因子来拟合。
 
 ## 最新增量快照

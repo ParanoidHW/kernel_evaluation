@@ -33,6 +33,7 @@ def evaluate_profiling(
     config_path: str | Path | None = None,
     include_gmm: bool = False,
     include_allgather: bool = False,
+    type_aliases: dict[str, Any] | None = None,
 ) -> ProfilingEvaluation:
     """Evaluate profiling CSV files and return library-friendly result rows.
 
@@ -54,6 +55,9 @@ def evaluate_profiling(
         if path is None:
             raise ValueError("evaluate_profiling requires either config or config_path")
         resolved_config = load_config(path)
+    if type_aliases is not None:
+        resolved_config = dict(resolved_config)
+        resolved_config["other_ops_type_aliases"] = type_aliases
     normalized_kind = op_kind.lower()
     if normalized_kind not in {"matmul", "grouped_matmul", "attention", "other_ops"}:
         raise NotImplementedError(f"unsupported op_kind: {op_kind}")

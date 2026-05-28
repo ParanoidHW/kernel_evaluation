@@ -38,17 +38,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--calibration-output", help="Write calibration suggestions JSON.")
     parser.add_argument("--include-gmm", action="store_true", help="Include GroupedMatmul rows.")
     parser.add_argument("--include-allgather", action="store_true", help="Include AllGatherMatmul rows.")
+    parser.add_argument(
+        "--disable-type-aliases",
+        action="store_true",
+        help="Disable non-hardware profiling Type aliases such as LightningIndexerQuant -> QuantLightningIndexer.",
+    )
+    parser.add_argument(
+        "--type-alias",
+        action="append",
+        default=[],
+        metavar="FROM=TO",
+        help="Add a profiling Type alias for this run. Can be repeated, for example --type-alias Foo=Bar.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    type_aliases: dict[str, Any] | None = None
+    if args.disable_type_aliases or args.type_alias:
+        type_aliases = {"enabled": not args.disable_type_aliases}
+        aliases: dict[str, str] = {}
+        for item in args.type_alias:
+            if "=" not in item:
+                raise ValueError(f"--type-alias expects FROM=TO, got: {item}")
+            source, target = item.split("=", 1)
+            aliases[source] = target
+        if aliases:
+            type_aliases["aliases"] = aliases
     report = evaluate_profiling(
         args.profiling,
         op_kind=args.op_kind,
         config_path=args.config,
         include_gmm=args.include_gmm,
         include_allgather=args.include_allgather,
+        type_aliases=type_aliases,
     )
     rows = report.rows
     unresolved = report.unresolved

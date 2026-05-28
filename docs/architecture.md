@@ -90,6 +90,7 @@ profiling Type/Name
 | `layout_pattern` | layout/memory 类算子的访问或转换模式，例如线性搬运、format transform、transpose、slice、多段 concat。 |
 | `quant_vector_fusion` | other_ops 中的动态量化或 norm+动态量化融合族，例如 `DynamicQuant`、`AddRmsNormDynamicQuant`。模型按源码中的逐行 reduce/scale/quant 和可选 smooth/gamma/beta pass 估计。 |
 | `mla_prolog_fusion` | `MlaPrologV3` 前处理融合族。模型按源码可见四个内部 matmul、norm/rope vector pass 和 active cache 写入估计；缺 `tiling_key/cache_index/actual_seq_len` 时为低置信。 |
+| Type alias | profiling Type 和源码注册 Type 命名不一致时的兼容映射，例如 `LightningIndexerQuant -> QuantLightningIndexer`。它是评估入口行为，不属于硬件平台配置；报告会同时保留原始 Type 和 canonical Type。 |
 | `source_unavailable` | profiling Type 在当前源码快照中找不到可用 op_host/op_kernel 主实现，只能保留 unresolved 或遗留说明，不能靠样本误差反推模型。 |
 
 ### 结果与误差字段
@@ -604,7 +605,8 @@ unresolved 至少保留原始 shape/dtype/format、缺失 attrs 和 source looku
 - reduction/norm/activation source map 已细化到 `ops-math/math/reduce_*`、`ops-nn/activation/softmax_v2|gelu|swish`、`ops-nn/norm/rms_norm|layer_norm_v3|add_rms_norm|group_norm_silu` 等目录；报告区分 `reduce_tree`、`softmax_reduce_exp_sum_normalize`、`rmsnorm_reduce_scale`、`rmsnorm_residual_fusion`、`layernorm_mean_var_scale`、`activation_vector_pipeline` 等策略。
 - index/scatter/routing 已补充 `GatherElements`、`ScatterElementsV2`、`MaskedSelectV3`、`LinearIndex`、`NonZero` 分类和源码路径；报告区分 `gather_random_read_missing_indices`、`scatter_random_write_missing_indices`、`mask_compaction_missing_selected_count`、`linear_index_missing_indices`、`moe_routing_missing_token_distribution` 等低置信策略。
 - unresolved tail 已补充 `RotaryPositionEmbedding`、`Range`、`Conv2D` 分类：Rope 对齐 `ops-transformer-master/posembedding/rotary_position_embedding`，Range 对齐 `ops-math/math/range`，Conv2D 对齐常规 CV/Cube kernel 族。profiling 中 `MemSet` 行 shape/dtype/format 为 `N/A`，当前保持 unresolved。
-- transformer/vector fusion 已补充 `RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3` 分类和成本模型。`DynamicQuant` 对齐 `ops-nn/quant/dynamic_quant` 的行 reduce-scale-quant，`AddRmsNormDynamicQuant` 对齐 `ops-nn/norm/add_rms_norm_dynamic_quant` 的 add+rmsnorm+dynamic quant 融合，`MlaPrologV3` 对齐 `ops-transformer-master/attention/mla_prolog_v3` 的四个内部 matmul、norm/rope 和 active cache 写入。
+- transformer/vector fusion 已补充 `RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3`、`QuantLightningIndexer` 分类和成本模型。`DynamicQuant` 对齐 `ops-nn/quant/dynamic_quant` 的行 reduce-scale-quant，`AddRmsNormDynamicQuant` 对齐 `ops-nn/norm/add_rms_norm_dynamic_quant` 的 add+rmsnorm+dynamic quant 融合，`MlaPrologV3` 对齐 `ops-transformer-master/attention/mla_prolog_v3` 的四个内部 matmul、norm/rope 和 active cache 写入，`QuantLightningIndexer` 对齐 `ops-transformer-master/attention/quant_lightning_indexer` 的 INT8 QK、PA block、topK sparse index 输出。
+- Type alias 默认包含 `LightningIndexerQuant -> QuantLightningIndexer`。该配置在评估入口层，可用 `--disable-type-aliases` 关闭，或用 `--type-alias FROM=TO` 为单次运行追加映射；不写入硬件平台 JSON。
 - reduction/layout 增量已补充 `ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。
 - `tools/other_ops_eval/api.py`：layout/memory、elementwise/vector、reduction、norm/activation、index/scatter/routing、CV 的首轮 analytic fallback 成本模型。
 - `tools/other_ops_eval/evaluator.py`：profiling CSV 读取、resolved/unresolved 报告、summary 输出。
@@ -641,7 +643,7 @@ python3 tools/eval_ops.py --op-kind other_ops \
 
 剩余任务：
 
-1. 为剩余 transformer/vector fusion 建独立设计：`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens`；`LightningIndexerQuant` 当前源码不可用，先作为遗留。
+1. 为剩余 transformer/vector fusion 建独立设计：`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens`；`QuantLightningIndexer` 后续继续补 exact sparse/topK runtime replay。
 2. 为 `Conv2D` 建立 `ops-nn/conv/conv2d_v2` 评估模型，按 Cube FLOPs、NC1HWC0/FRACTAL_Z storage、tiling、L0/L1/BT、bias/scale/fixpipe 拆分。
 3. 为 index/scatter 增加 bounds 语义；缺 indices 时输出可解释区间，而不是单点 overestimate。
 4. 若 profiling 能补 attrs，恢复 `Transpose/Slice/Pack/Tile/AsStrided/Concat` 的更精确 source replay。

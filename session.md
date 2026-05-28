@@ -739,3 +739,37 @@ python3 .agents/skills/kernel-eval-iteration/scripts/analyze_report_errors.py /t
 
 - 当前 profiling 缺 exact `baseN/singleCoreN/tileL2cache/template key`，无法解释 longcat 与 ds3.2 full_quant 的分支差异。
 - 不修改模型，不引入针对 longcat 形状的校准项；该问题记录为遗留，后续需要 exact quant tiling 或更细 MTE/fixpipe 计数器后再恢复。
+
+## 2026-05-28 LightningIndexerQuant alias 修正
+
+用户指出 profiling 中的 `LightningIndexerQuant` 可能对应源码 `QuantLightningIndexer`。复查源码后确认：
+
+- 源码主路径：`ops-transformer-master/attention/quant_lightning_indexer`
+- 注册 Type：`OP_ADD(QuantLightningIndexer)`
+- 文档：`ops-transformer-master/attention/quant_lightning_indexer/docs/aclnnQuantLightningIndexer.md`
+- profiling 输入与源码原型匹配：INT8 query/key、weights、query/key dequant scale、actual seq length、block table，输出 `sparse_indices`。
+
+实现调整：
+
+- 新增通用 Type alias 机制，默认包含 `LightningIndexerQuant -> QuantLightningIndexer`。
+- alias 是评估入口行为，不写入 `configs/ascend_*.json`，避免把命名兼容误绑定到硬件平台。
+- CLI 新增 `--disable-type-aliases`，可关闭默认 alias；新增 `--type-alias FROM=TO`，可为单次运行追加其他映射。
+- 报告新增 `canonical_type` 和 `type_alias_applied`，保留 profiling 原始 `type`。
+- 新增 `lightning_indexer_fusion` 模型，对齐 `QuantLightningIndexer` 的 INT8 QK、PA block、workspace score、topK sparse index 输出。由于 profiling 缺 `sparse_count/sparse_mode/actual_seq_lengths/block_table` 实际值，当前为 `source_strategy_replay_missing_runtime_values`，置信度 low。
+
+验证：
+
+```bash
+python3 -m json.tool configs/ascend_910c.json
+python3 -m json.tool configs/ascend_910b4.json
+python3 -m json.tool configs/ascend_910b4_1.json
+python3 -m compileall tools
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --output /tmp/ds32_other_ops_alias2.csv --unresolved-output /tmp/ds32_other_ops_alias2_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --disable-type-aliases --output /tmp/ds32_other_ops_no_alias2.csv --unresolved-output /tmp/ds32_other_ops_no_alias2_unresolved.csv
+```
+
+结果：
+
+- 默认 alias 开启：ds3.2 other_ops resolved `3770`，unresolved `80`；新增 `lightning_indexer_fusion` 90 行，median duration/estimate `1.84`。
+- 关闭 alias：resolved `3680`，unresolved `170`；`LightningIndexerQuant` 90 行回到 unresolved。
+- 当前 ds3.2 top tail 仍是 `GatherV2` 缺 indices；`QuantLightningIndexer` 不是最大误差来源。

@@ -50,7 +50,16 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
             output_dtypes = split_semicolon_values(row.get("Output Data Types"))
             input_formats = parse_formats(row.get("Input Formats"))
             output_formats = parse_formats(row.get("Output Formats"))
-            spec = build_spec(op_type, input_shapes, output_shapes, input_dtypes, output_dtypes, input_formats, output_formats)
+            spec = build_spec(
+                op_type,
+                input_shapes,
+                output_shapes,
+                input_dtypes,
+                output_dtypes,
+                input_formats,
+                output_formats,
+                config,
+            )
             if spec is None:
                 unresolved.append(
                     {
@@ -79,6 +88,8 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "line": line_no,
                     "name": row.get("Name", ""),
                     "type": op_type,
+                    "canonical_type": spec.op_type,
+                    "type_alias_applied": spec.type_alias_applied,
                     "accelerator_core": row.get("Accelerator Core", ""),
                     "op_family": spec.op_family,
                     "source_repo": spec.source_repo,

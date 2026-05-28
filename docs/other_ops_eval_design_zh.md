@@ -51,6 +51,21 @@ tools/other_ops_eval/evaluator.py
 
 这些参数是平台级机制参数：AIV 吞吐、HBM 带宽、kernel launch floor、多 pass reduction/norm/softmax、transcendental vector 指令复杂度和随机访问风险。它们不是 per-shape 拟合项。
 
+Type 命名兼容不属于硬件平台配置。评估器内置一组默认 alias，并可通过 CLI/API 关闭或追加：
+
+```text
+默认 alias:
+LightningIndexerQuant -> QuantLightningIndexer
+
+关闭默认 alias:
+python3 tools/eval_ops.py --op-kind other_ops ... --disable-type-aliases
+
+追加单次运行 alias:
+python3 tools/eval_ops.py --op-kind other_ops ... --type-alias FooOp=CanonicalFooOp
+```
+
+报告保留 `type`、`canonical_type` 和 `type_alias_applied`，因此 profiling 原始 Type 和映射后的源码 Type 都可追踪。
+
 ## 范围和排除规则
 
 `other_ops` 先读取 profiling `Type`，排除：
@@ -529,8 +544,9 @@ file,line,type,name,reason,input_shapes,output_shapes,input_dtypes,output_dtypes
 - `Gather/Scatter/TopK/MoE`：缺 indices、selected count、routing/token 分布，当前只能 low-confidence fallback。
 - `Pack/Slice/Transpose/AsStrided/Concat/Tile`：缺 axis、offset、stride、multiples 等 attrs，不能 exact replay。
 - `Conv2D`：已分类为 `cv_regular`，但当前没有 Cube tiling/BT/fixpipe 模型。
-- 已新增覆盖：`RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3`、`ReverseV2`、`ReduceAny`、`ArgMaxWithValue`。
-- 模型样本剩余 unresolved：`LightningIndexerQuant`、`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens` 等。`LightningIndexerQuant` 当前源码快照只找到 experimental 示例，未找到 op_host/op_kernel 主实现，先标记为 `source_unavailable` 遗留。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
+- 已新增覆盖：`RotaryMul`、`DynamicQuant`、`AddRmsNormDynamicQuant`、`MlaPrologV3`、`ReverseV2`、`ReduceAny`、`ArgMaxWithValue`、`QuantLightningIndexer`。
+- `LightningIndexerQuant` 通过默认 alias 映射到 `QuantLightningIndexer`，源码路径为 `ops-transformer-master/attention/quant_lightning_indexer`。该映射不是硬件配置，用户可通过 `--disable-type-aliases` 关闭。
+- 模型样本剩余 unresolved：`InterleaveRope`、`KvRmsNormRopeCache`、`Rsqrt`、`MoeComputeExpertTokens` 等。`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估，后续按忽略项处理。
 - 910C longcat stage2 已补充 `FloorDiv`、`FloorMod`、`ReduceMax`、`GatherElementsV2`、`Maximum`、`Cumsum`、`Tril`、`LogicalNot`、`Unpack`。其中 `GatherElementsV2/Cumsum/Tril/Unpack` 仍因缺 indices、axis 或 diagonal 等 attrs 标为低置信。
 
 ## 后续任务
@@ -539,4 +555,4 @@ file,line,type,name,reason,input_shapes,output_shapes,input_dtypes,output_dtypes
 2. 为 `Conv2D` 建立 `ops-nn/conv/conv2d_v2` 评估模型，按 Cube FLOPs、NC1HWC0/FRACTAL_Z storage、tiling、L0/L1/BT、bias/scale/fixpipe 拆分。
 3. 为 index/scatter 增加 bounds 语义：在缺 indices 时输出 min/max，而不是单点 overestimate。
 4. 若 profiling 能补 attrs，恢复 `Transpose/Slice/Pack/Tile/AsStrided/Concat` 的更精确 source replay。
-5. `LightningIndexerQuant` 等源码不可用 Type 等待源码或运行时语义补齐后再恢复建模。
+5. `QuantLightningIndexer` 需要继续补 exact `sparse_count/sparse_mode/actual_seq_lengths/block_table` replay；当前为 source-strategy low-confidence 模型。

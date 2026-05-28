@@ -126,6 +126,8 @@ QUANT_VECTOR_FUSION_TYPES = {
     "multiaddrmsnormdynamicquant",
 }
 
+LIGHTNING_INDEXER_TYPES = {"quantlightningindexer"}
+
 INDEX_SCATTER_TYPES = {
     "gatherv2",
     "gatherv3",
@@ -170,10 +172,16 @@ CV_TYPES = {
 
 MLA_PROLOG_TYPES = {"mlaprologv3"}
 
+DEFAULT_TYPE_ALIASES = {
+    "lightningindexerquant": "QuantLightningIndexer",
+}
+
 
 @dataclass(frozen=True)
 class OtherOpSpec:
     op_type: str
+    original_op_type: str
+    type_alias_applied: str
     op_family: str
     input_shapes: list[list[int]]
     output_shapes: list[list[int]]
@@ -195,6 +203,30 @@ class OtherOpSpec:
 
 def normalize_type(op_type: str) -> str:
     return op_type.replace("_", "").replace("-", "").lower()
+
+
+def other_ops_type_aliases(config: dict[str, Any] | None) -> dict[str, str]:
+    alias_cfg = (config or {}).get("other_ops_type_aliases", {})
+    if not bool(alias_cfg.get("enabled", True)):
+        return {}
+    aliases = dict(DEFAULT_TYPE_ALIASES) if bool(alias_cfg.get("use_defaults", True)) else {}
+    extra_aliases = alias_cfg.get("aliases", {})
+    if isinstance(extra_aliases, dict):
+        aliases.update({normalize_type(str(key)): str(value) for key, value in extra_aliases.items()})
+    disabled = alias_cfg.get("disabled_aliases", [])
+    if isinstance(disabled, list):
+        for op_type in disabled:
+            aliases.pop(normalize_type(str(op_type)), None)
+    return aliases
+
+
+def canonical_op_type(op_type: str, config: dict[str, Any] | None = None) -> tuple[str, str]:
+    aliases = other_ops_type_aliases(config)
+    normalized = normalize_type(op_type)
+    aliased = aliases.get(normalized)
+    if aliased:
+        return aliased, f"{op_type}->{aliased}"
+    return op_type, ""
 
 
 def is_other_ops_row(row: dict[str, Any]) -> bool:
@@ -285,6 +317,10 @@ QUANT_VECTOR_FUSION_SOURCE_PATHS = {
     "multiaddrmsnormdynamicquant": "ops-nn/norm/multi_add_rms_norm_dynamic_quant",
 }
 
+LIGHTNING_INDEXER_SOURCE_PATHS = {
+    "quantlightningindexer": "ops-transformer-master/attention/quant_lightning_indexer",
+}
+
 INDEX_SCATTER_SOURCE_PATHS = {
     "gatherv2": "ops-nn/index/gather_v2",
     "gatherv3": "ops-nn/index/gather_v3",
@@ -326,6 +362,8 @@ def classify_op_family(op_type: str) -> tuple[str, str, str]:
         return "norm_activation", "ops-nn", NORM_ACTIVATION_SOURCE_PATHS.get(normalized, "ops-nn/norm_or_activation")
     if normalized in QUANT_VECTOR_FUSION_TYPES:
         return "quant_vector_fusion", "ops-nn", QUANT_VECTOR_FUSION_SOURCE_PATHS.get(normalized, "ops-nn/quant_or_norm")
+    if normalized in LIGHTNING_INDEXER_TYPES:
+        return "lightning_indexer_fusion", "ops-transformer-master", LIGHTNING_INDEXER_SOURCE_PATHS[normalized]
     if normalized in MLA_PROLOG_TYPES:
         return "mla_prolog_fusion", "ops-transformer-master", "ops-transformer-master/attention/mla_prolog_v3"
     if normalized in INDEX_SCATTER_TYPES:
@@ -347,8 +385,10 @@ def build_spec(
     output_dtypes: list[str],
     input_formats: list[str],
     output_formats: list[str],
+    config: dict[str, Any] | None = None,
 ) -> OtherOpSpec | None:
-    family, source_repo, source_path = classify_op_family(op_type)
+    canonical_type, alias = canonical_op_type(op_type, config)
+    family, source_repo, source_path = classify_op_family(canonical_type)
     if family == "unsupported_other":
         return None
     input_elements = [num_elements(shape) for shape in input_shapes]
@@ -369,9 +409,9 @@ def build_spec(
     logical_elements = max(output_elements or [0], default=0)
     if logical_elements == 0:
         logical_elements = max(input_elements or [0], default=0)
-    missing_attrs = infer_missing_attrs(op_type, family)
+    missing_attrs = infer_missing_attrs(canonical_type, family)
     source_strategy = infer_source_strategy(
-        op_type,
+        canonical_type,
         family,
         input_elements,
         logical_elements,
@@ -379,9 +419,11 @@ def build_spec(
         output_formats,
         missing_attrs,
     )
-    layout_pattern = infer_layout_pattern(op_type, family, input_shapes, output_shapes, input_formats, output_formats)
+    layout_pattern = infer_layout_pattern(canonical_type, family, input_shapes, output_shapes, input_formats, output_formats)
     return OtherOpSpec(
-        op_type=op_type,
+        op_type=canonical_type,
+        original_op_type=op_type,
+        type_alias_applied=alias,
         op_family=family,
         input_shapes=input_shapes,
         output_shapes=output_shapes,
@@ -427,6 +469,8 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
         missing.extend(["dst_type", "quant_mode", "symmetry"])
     if normalized == "mlaprologv3":
         missing.extend(["tiling_key", "actual_seq_len_values", "cache_index_values"])
+    if normalized == "quantlightningindexer":
+        missing.extend(["sparse_count", "sparse_mode", "actual_seq_lengths_query", "actual_seq_lengths_key", "block_table_values"])
     if family == "index_scatter_routing":
         if normalized.startswith("moe"):
             missing.append("routing_values")
@@ -534,6 +578,8 @@ def infer_source_strategy(
             return "add_rmsnorm_dynamic_quant_reduce_quant_fusion"
     if family == "mla_prolog_fusion":
         return "mla_prolog_v3_four_matmul_norm_rope_cache"
+    if family == "lightning_indexer_fusion":
+        return "quant_lightning_indexer_qk_topk_pa_missing_runtime_values"
     if family == "index_scatter_routing":
         if normalized in {"gatherv2", "gatherv3", "gatherelements", "gatherelementsv2"}:
             return "gather_random_read_missing_indices"
