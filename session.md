@@ -773,3 +773,32 @@ python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/pro
 - 默认 alias 开启：ds3.2 other_ops resolved `3770`，unresolved `80`；新增 `lightning_indexer_fusion` 90 行，median duration/estimate `1.84`。
 - 关闭 alias：resolved `3680`，unresolved `170`；`LightningIndexerQuant` 90 行回到 unresolved。
 - 当前 ds3.2 top tail 仍是 `GatherV2` 缺 indices；`QuantLightningIndexer` 不是最大误差来源。
+
+## 2026-05-28 待校准算子正向评估方案
+
+用户要求新增面向“待加强、低置信算子”的正向 kernel 评估方案：不能依赖实测 profiling 或 actual tiling 来校准硬件利用率，只能从 kernel 实现、host tiling 逻辑和硬件配置出发。已新增 `to_be_calib/README.md` 记录设计。
+
+本轮重点以 `MlaPrologV3` 为 P0 方案对象，源码依据如下：
+
+- `ops-transformer-master/attention/mla_prolog_v3/op_kernel/mla_prolog_v3.cpp`：V3 device kernel 入口，模板参数包含 `CacheMode`、`Scenario`、`QuantMode`、`SplitMMode`、`CvMode`，默认 `KERNEL_TYPE_MIX_AIC_1_2`；arch35 下包含 splitN 和 splitM 实现。
+- `ops-transformer-master/attention/mla_prolog_v3/op_host/mla_prolog_v3_tiling_register.cpp`：V3 直接注册 `TilingMlaProlog`。
+- `ops-transformer-master/attention/mla_prolog/op_host/mla_prolog_tiling.cpp`：共享 host tiling，包含 shape 解析、四个 Matmul 切分、workspace 计算、tiling key 生成和 blockDim 设置。
+- `ops-transformer-master/attention/mla_prolog_v3/docs/MlaPrologV3算子设计介绍.md`：说明四个 Matmul、RMSNorm、Rope、cache 写入，以及 AIC/AIV 同步点。
+
+方案要点：
+
+- 新增评估语义 `source_tiling_search_no_calib`：在没有 actual tiling 时，只枚举源码中存在的 tile/split/template 候选，并用硬件配置做容量过滤和成本计算。
+- `MlaPrologV3` 解析 `B/S/T/He/Hcq/Hckv/N/D/Dr/blockNum/blockSize`，并根据 attr、dtype、optional scale 推断 `CACHE_MODE`、`SCENARIO`、`QUANT_MODE`、`ACTUAL_SEQ_LEN_MODE`、`SPLIT_M_MODE`、`CV_MODE`。
+- 四个 Cube 子图按源码维度建模：`MatmulCq(M=stepBatch,N=Hcq,K=He)`、`MatmulCkvKr(M=stepBatch,N=Hckv+Dr,K=He)`、`MatmulQcQr(M=stepBatch,N=N*(D+Dr),K=Hcq)`、`MatmulQn(M=stepBatch,N=Hckv,K=D)`。
+- Vector 子图按 `RmsNormCq`、`RmsNormCkv`、`RopeQr/RopeKr`、DynamicQuant/Dequant、cache scatter 拆分；workspace 复用 `CalcWorkSpace` 公式。
+- 调度估计区分 `lower_bound_us`、`source_schedule_bound_us`、`upper_bound_us`，`estimated_us` 取源码 DAG 约束下的 bound；缺 `actualSeqLen/cacheIndex/quant attr` 时输出区间均值和诊断标签。
+- 正向评估策略建议放独立配置，不写入 `configs/ascend_*.json`，避免把算子策略误绑定到硬件平台。
+
+后续实施 TODO：
+
+1. 新增 `source_tiling_search_no_calib` 入口和报告字段。
+2. 实现 `MlaPrologV3` parser，能从 profiling shape/attr 推断 `MlaPrologBaseShapeInfo`。
+3. 重放 `TilingMlaProlog` 的 tiling key、四个 Matmul 切分和 workspace 公式。
+4. 增加候选 tiling 容量过滤、Cube/Vector/GM/workspace/sync 分项成本。
+5. validation-only 对比 profiling 残差，不回写经验校准项。
+6. 将 `QuantLightningIndexer` 纳入同一正向评估入口，缺 sparse runtime 值时输出区间均值。
