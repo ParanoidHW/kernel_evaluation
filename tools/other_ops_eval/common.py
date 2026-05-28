@@ -87,6 +87,7 @@ ELEMENTWISE_TYPES = {
     "logicalnot",
     "rotarypositionembedding",
     "rotarymul",
+    "rsqrt",
 }
 
 REDUCTION_TYPES = {
@@ -148,7 +149,7 @@ INDEX_SCATTER_TYPES = {
     "moegatingtopkhash",
     "moeinitrouting",
     "moeinitroutingv3",
-    "moecomputerexperttokens",
+    "moecomputeexperttokens",
     "moefinalizeroutingv2",
     "moererouting",
     "moedistributedispatchv2",
@@ -278,6 +279,7 @@ ELEMENTWISE_SOURCE_PATHS = {
     "logicalnot": "ops-math/math/logical_not",
     "rotarypositionembedding": "ops-transformer-master/posembedding/rotary_position_embedding",
     "rotarymul": "ops-transformer-master/posembedding/apply_rotary_pos_emb",
+    "rsqrt": "ops-math/math/rsqrt",
 }
 
 REDUCTION_SOURCE_PATHS = {
@@ -340,7 +342,7 @@ INDEX_SCATTER_SOURCE_PATHS = {
     "moegatingtopkhash": "ops-transformer-master/moe/moe_gating_top_k",
     "moeinitrouting": "ops-transformer-master/moe/moe_init_routing",
     "moeinitroutingv3": "ops-transformer-master/moe/moe_init_routing_v3",
-    "moecomputerexperttokens": "ops-transformer-master/moe/moe_compute_expert_tokens",
+    "moecomputeexperttokens": "ops-transformer-master/moe/moe_compute_expert_tokens",
     "moefinalizeroutingv2": "ops-transformer-master/moe/moe_finalize_routing_v2",
     "moererouting": "ops-transformer-master/moe/moe_re_routing",
     "moedistributedispatchv2": "ops-transformer-master/mc2/moe_distribute_dispatch_v2",

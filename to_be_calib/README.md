@@ -280,7 +280,7 @@ CV 类优先级低于 transformer/vector fusion 和 index/routing，因为当前
 
 | 顺序 | 任务 | 验收标准 |
 | --- | --- | --- |
-| 1 | 新增 `source_tiling_search_no_calib` 评估入口和报告字段 | CLI 能对指定 op 启用正向评估，默认不影响现有 matmul/fa/gmm/other_ops |
+| 1 | 新增 `source_tiling_search_no_calib` 评估入口和报告字段 | 已在 `forward-eval-low-confidence-ops` 分支对 `other_ops` prototype 实现：输出 `bounds_min_us/bounds_max_us/optimal_tiling_us/source_schedule_bound_us/forward_eval_mode/bounds_reason` |
 | 2 | 实现 `MlaPrologV3` parser | 能从 profiling shape/attr 推断 `MlaPrologBaseShapeInfo`，缺 attr 时给出明确 unresolved/diagnosis |
 | 3 | 重放 `TilingMlaProlog` 中的 tiling key、四个 Matmul 切分和 workspace 公式 | 单元测试覆盖 no quant、partial quant、full quant、MXFP8 splitM、empty tensor |
 | 4 | 实现候选 tiling 容量过滤和成本模型 | 报告 Cube/Vector/GM/workspace/sync 分项和 candidate 选择结果 |
@@ -289,6 +289,30 @@ CV 类优先级低于 transformer/vector fusion 和 index/routing，因为当前
 | 7 | 将 index/scatter/routing 改为 bounds-first 报告 | `Gather/Scatter/Mask/MoE` 输出 `bounds_min_us/bounds_max_us`，默认单点为区间均值 |
 | 8 | 将 layout 缺 attrs 算子枚举常见源码策略候选 | `Transpose/Slice/Pack/Tile/Pad/Sort` 报告候选策略和缺失 attrs |
 | 9 | 为 Conv/CV 类建立独立 Cube/vector/memory 模型 | `Conv2D` 不再只走 `cv_regular` fallback；源码缺失时明确 `source_path_pending` |
+
+## Prototype 验证记录
+
+`forward-eval-low-confidence-ops` 分支已实现一版 other_ops 正向评估 prototype。该版本不做实测校准，只增加低置信算子的 bounds-first 报告和最优物理下界对比。
+
+新增报告字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `forward_eval_mode` | `source_tiling_search_no_calib`、`bounds_first_no_runtime_values` 或 `source_strategy_replay` |
+| `bounds_min_us` / `bounds_max_us` | 缺 runtime 值或缺 attrs 时的源码可解释区间 |
+| `bounds_reason` | 区间来源，例如 `missing_indices_linear_vs_random_gather` |
+| `bounds_position` | 实测落在区间内、低于区间或高于区间 |
+| `optimal_tiling_us` | 硬件物理下界 + launch，只用于看最优 tiling 与实测差距 |
+| `duration_over_optimal_tiling` | `duration_us / optimal_tiling_us` |
+| `source_schedule_bound_us` | 当前源码调度 bound，prototype 中低置信类默认取区间均值 |
+
+验证结果位于 `eval_results/20260528_forward_eval_low_confidence/`。关键观察：
+
+- `QuantLightningIndexer` 在 ds3.2 的 90 行全部落入 bounds，median `duration/optimal_tiling_us = 1.863`。
+- `MlaPrologV3` 在 ds3.2 有 80/90 行落入 bounds，但 longcat 910C 140 行全部高于 bounds，说明 shape/attr/cache active 推断仍不足。
+- `GatherV2` 仍是 top tail，且 `optimal_tiling_us` 也远高于实测；这不是 tiling 优化能解释的问题，而是缺 indices/axis/有效访问范围导致工作量解析过大。
+- qwen7b `Rsqrt` 已被解析，qwen other_ops unresolved 清零；但 `duration/optimal_tiling_us` 约 3.1，属于小 vector kernel launch/sync floor 或平台固定开销问题。
+- base 910B4 `Conv2D/cv_regular` median `duration/optimal_tiling_us = 11.193`，需要独立 Conv2D tiling/format/fixpipe 模型。
 
 ## 当前风险
 

@@ -826,3 +826,77 @@ python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/pro
 5. Conv/CV 类新增独立 Cube/vector/memory 方案，源码缺路径时标记 `source_path_pending`。
 
 关键约束保持不变：profiling 只能用于 validation-only 残差分析，不能用于回写硬件利用率、TopK factor、rope efficiency、index random factor 或 launch floor。
+
+## 2026-05-28 正向评估 prototype 实现与验证
+
+已按用户要求创建本地分支 `forward-eval-low-confidence-ops`，在该分支实现一版 other_ops 正向评估 prototype。
+
+实现内容：
+
+- `tools/other_ops_eval/api.py` 的 `OtherOpCostEstimate` 新增：
+  - `bounds_min_us`
+  - `bounds_max_us`
+  - `optimal_tiling_us`
+  - `source_schedule_bound_us`
+  - `forward_eval_mode`
+  - `bounds_reason`
+- 对缺 runtime values / 缺 attrs 的低置信类算子启用 bounds-first：
+  - `index_scatter_routing`
+  - `lightning_indexer_fusion`
+  - `mla_prolog_fusion`
+  - `layout_memory` with missing attrs
+  - `quant_vector_fusion` with missing attrs
+  - `cv_regular`
+- `Gather/Scatter/MoE` 的 bounds 按可解释工作量计算：indices 字节、selected slice/output 字节、cacheline 对齐随机读上界、updates/output 写入；不再按 full data tensor 输入全量读，也不调 `index_random_access_factor`。
+- 这些类别的默认 `estimated_us` 使用区间均值；`optimal_tiling_us` 保持硬件物理下界 + launch，不作为当前 kernel 耗时。
+- `tools/other_ops_eval/evaluator.py` 报告新增：
+  - `bounds_min_us`
+  - `bounds_max_us`
+  - `bounds_reason`
+  - `bounds_position`
+  - `optimal_tiling_us`
+  - `source_schedule_bound_us`
+  - `duration_over_optimal_tiling`
+  - `optimal_relative_gap`
+- 修复两个明显解析缺口：
+  - `Rsqrt` 归入 `elementwise_vector`，source path `ops-math/math/rsqrt`。
+  - `MoeComputeExpertTokens` 归入 `index_scatter_routing`，source path `ops-transformer-master/moe/moe_compute_expert_tokens`。
+
+验证命令：
+
+```bash
+python3 -m compileall tools
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C/longcat_kernel_details.csv --config configs/ascend_910c.json --output /tmp/base910c_longcat_other_ops_forward3.csv --unresolved-output /tmp/base910c_longcat_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --output /tmp/ds32_other_ops_forward3.csv --unresolved-output /tmp/ds32_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/qwen7b/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910b4_1.json --output /tmp/qwen7b_other_ops_forward3.csv --unresolved-output /tmp/qwen7b_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/gemma/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910b4.json --output /tmp/gemma_other_ops_forward3.csv --unresolved-output /tmp/gemma_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910B4/kernel_details.csv --config configs/ascend_910b4.json --output /tmp/base910b4_other_ops_forward3.csv --unresolved-output /tmp/base910b4_other_ops_forward3_unresolved.csv
+```
+
+结果已写入 `eval_results/20260528_forward_eval_low_confidence/`：
+
+- `eval_summary.csv`
+- `other_ops_eval_summary.csv`
+- `metadata.txt`
+
+汇总：
+
+| report | rows | unresolved | rel max | p95 | median | optimal gap max | optimal gap p95 | duration/optimal median | top |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| longcat 910C | 2210 | 160 | 1.326 | 0.961 | 0.450 | 249.577 | 1.083 | 1.298 | `Cast` |
+| ds3.2 910C | 3770 | 80 | 1.128 | 0.879 | 0.552 | 10.862 | 0.953 | 1.655 | `Cast` |
+| qwen7b 910B4-1 | 4077 | 0 | 0.908 | 0.854 | 0.351 | 98.989 | 0.857 | 1.235 | `Transpose` |
+| gemma 910B4 | 3066 | 309 | 2.861 | 1.487 | 0.543 | 31.229 | 2.343 | 1.445 | `LogicalNot` |
+| base 910B4 | 547 | 46 | 5.144 | 1.641 | 0.281 | 2.899 | 1.475 | 1.249 | `GroupNormSilu` |
+
+初步结论：
+
+- `QuantLightningIndexer` 在 ds3.2 上 90 行全部落入 bounds，median `duration/estimate=1.114`，median `duration/optimal=1.863`。说明正向区间能覆盖当前样本，当前 kernel 大约是最优物理下界的 1.86 倍。
+- `MlaPrologV3` 在 ds3.2 上 80/90 行落入 bounds，median `duration/estimate=1.125`，median `duration/optimal=0.717`；longcat 910C 140 行全部 above bounds，说明当前 MlaPrologV3 的 shape/attr/cache active 推断仍不足，不能把现有下界解释为真实工作量。
+- `GatherV2` 的 full-input 过计已修正为 selected slice/cacheline bounds 后，不再是 longcat/ds3.2/gemma 的 top tail。qwen 的 top tail 转为缺 `perm` 的 `Transpose` 和 `ArgMaxV2`，说明 index 工作量方向已明显改善。
+- `optimal_relative_gap_max` 对 longcat/qwen/gemma 仍很高，原因是 `optimal_tiling_us` 仍包含输入 full tensor 的通用物理下界字段；对 gather 这类非全量读取算子，后续应新增 `selected_lower_bound_us`，不能继续复用 full-input `ideal_lower_bound_us` 判断最优 tiling。
+- `Rsqrt` 解析后 qwen7b unresolved 清零；但 `Rsqrt/reduction` 类 median `duration/optimal=3.114`，主要是小 vector kernel launch/sync 或平台 floor，不能从 qwen 单样本反推硬件常数。
+- base 910B4 `Conv2D/cv_regular` median `duration/optimal=11.193`，说明最优物理下界与真实 Conv kernel 差距大，后续必须单独实现 Conv2D tiling/format/fixpipe，而不是用 vector fallback。
+- gemma unresolved 除 `AutomaticBufferFusionOp` 和 `Data` 外已清理；`AutomaticBufferFusionOp` 按用户确认继续忽略。
+
+本轮没有引入实测校准项；bounds 基于源码可解释工作量、cacheline 随机读上界、workspace 和硬件配置，报告里保留 `bounds_reason` 和 `bounds_position`。

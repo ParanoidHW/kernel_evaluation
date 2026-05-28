@@ -1,0 +1,15 @@
+evaluated_at_utc=2026-05-28
+base_commit=60f36fd
+branch=forward-eval-low-confidence-ops
+scope=other_ops forward evaluation prototype for low-confidence and missing-tiling operators
+
+Commands:
+
+python3 -m compileall tools
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910C/longcat_kernel_details.csv --config configs/ascend_910c.json --output /tmp/base910c_longcat_other_ops_forward3.csv --unresolved-output /tmp/base910c_longcat_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/ds3.2/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910c.json --output /tmp/ds32_other_ops_forward3.csv --unresolved-output /tmp/ds32_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/qwen7b/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910b4_1.json --output /tmp/qwen7b_other_ops_forward3.csv --unresolved-output /tmp/qwen7b_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/profiling_with_model_code/gemma/ASCEND_PROFILER_OUTPUT/kernel_details.csv --config configs/ascend_910b4.json --output /tmp/gemma_other_ops_forward3.csv --unresolved-output /tmp/gemma_other_ops_forward3_unresolved.csv
+python3 tools/eval_ops.py --op-kind other_ops --profiling example_profilings/910B4/kernel_details.csv --config configs/ascend_910b4.json --output /tmp/base910b4_other_ops_forward3.csv --unresolved-output /tmp/base910b4_other_ops_forward3_unresolved.csv
+
+Detailed CSV reports were generated locally but are ignored by eval_results/.gitignore.

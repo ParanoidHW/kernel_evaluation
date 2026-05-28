@@ -81,6 +81,18 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
             duration_us = parse_float(row.get("Duration(us)"))
             residual_us = duration_us - cost.total_us
             duration_over_estimate = duration_us / cost.total_us if cost.total_us > 0 else 0.0
+            duration_over_optimal = duration_us / cost.optimal_tiling_us if cost.optimal_tiling_us > 0 else 0.0
+            optimal_relative_gap = (
+                abs(cost.optimal_tiling_us - duration_us) / max(duration_us, 1e-9) if duration_us > 0 else 0.0
+            )
+            bounds_position = ""
+            if duration_us > 0 and cost.bounds_min_us > 0 and cost.bounds_max_us > 0:
+                if duration_us < cost.bounds_min_us:
+                    bounds_position = "below_bounds"
+                elif duration_us > cost.bounds_max_us:
+                    bounds_position = "above_bounds"
+                else:
+                    bounds_position = "within_bounds"
             diagnosis, confidence = _diagnosis(spec, cost, duration_us)
             records.append(
                 {
@@ -97,6 +109,7 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "source_strategy": spec.source_strategy,
                     "layout_pattern": spec.layout_pattern,
                     "tiling_source": cost.tiling_source,
+                    "forward_eval_mode": cost.forward_eval_mode,
                     "missing_attrs": spec.missing_attrs,
                     "input_shapes": row.get("Input Shapes", ""),
                     "output_shapes": row.get("Output Shapes", ""),
@@ -120,6 +133,12 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "workspace_us": cost.workspace_us,
                     "sync_overhead_us": cost.sync_overhead_us,
                     "launch_overhead_us": cost.launch_overhead_us,
+                    "bounds_min_us": cost.bounds_min_us,
+                    "bounds_max_us": cost.bounds_max_us,
+                    "bounds_reason": cost.bounds_reason,
+                    "bounds_position": bounds_position,
+                    "optimal_tiling_us": cost.optimal_tiling_us,
+                    "source_schedule_bound_us": cost.source_schedule_bound_us,
                     "current_kernel_bound_us": cost.current_kernel_bound_us,
                     "ideal_lower_bound_us": cost.ideal_lower_bound_us,
                     "estimated_us": cost.total_us,
@@ -127,6 +146,8 @@ def evaluate_file(path: Path, config: dict[str, Any]) -> tuple[list[dict[str, An
                     "duration_us": duration_us,
                     "residual_us": residual_us,
                     "duration_over_estimate": duration_over_estimate,
+                    "duration_over_optimal_tiling": duration_over_optimal,
+                    "optimal_relative_gap": optimal_relative_gap,
                     "bottleneck": cost.dominant_component,
                     "diagnosis": diagnosis,
                     "confidence": confidence,
@@ -143,9 +164,25 @@ def print_summary(rows: list[dict[str, Any]], unresolved: list[dict[str, Any]]) 
     print("\nBy family:")
     for family, family_rows in sorted(by_family.items(), key=lambda item: len(item[1]), reverse=True):
         ratios = [float(row["duration_over_estimate"]) for row in family_rows if float(row.get("estimated_us", 0) or 0) > 0]
+        optimal_ratios = [
+            float(row["duration_over_optimal_tiling"])
+            for row in family_rows
+            if float(row.get("optimal_tiling_us", 0) or 0) > 0
+        ]
         median_ratio = statistics.median(ratios) if ratios else 0.0
+        median_optimal_ratio = statistics.median(optimal_ratios) if optimal_ratios else 0.0
         total_duration = sum(float(row.get("duration_us", 0) or 0) for row in family_rows)
-        print(f"  {family}: n={len(family_rows)} total_duration_us={total_duration:.3f} median_duration_over_estimate={median_ratio:.2f}")
+        bounds_counts: dict[str, int] = {}
+        for row in family_rows:
+            position = str(row.get("bounds_position", ""))
+            if position:
+                bounds_counts[position] = bounds_counts.get(position, 0) + 1
+        bounds_text = ",".join(f"{key}:{value}" for key, value in sorted(bounds_counts.items())) or "-"
+        print(
+            f"  {family}: n={len(family_rows)} total_duration_us={total_duration:.3f} "
+            f"median_duration_over_estimate={median_ratio:.2f} "
+            f"median_duration_over_optimal={median_optimal_ratio:.2f} bounds={bounds_text}"
+        )
     if unresolved:
         print("\nTop unresolved types:")
         counts: dict[str, int] = {}

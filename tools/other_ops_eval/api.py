@@ -25,10 +25,16 @@ class OtherOpCostEstimate:
     workspace_us: float
     sync_overhead_us: float
     launch_overhead_us: float
+    bounds_min_us: float
+    bounds_max_us: float
+    optimal_tiling_us: float
+    source_schedule_bound_us: float
     total_us: float
     ideal_lower_bound_us: float
     current_kernel_bound_us: float
     tiling_source: str
+    forward_eval_mode: str
+    bounds_reason: str
     dominant_component: str
 
 
@@ -87,6 +93,8 @@ def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
         return 6.0
     if normalized in {"cos", "sin"}:
         return cfg["transcendental_op_factor"]
+    if normalized == "rsqrt":
+        return max(cfg["transcendental_op_factor"], 8.0)
     if normalized in {"sigmoid"}:
         return cfg["activation_op_factor"]
     if normalized in {"pows", "pow"}:
@@ -203,6 +211,109 @@ def _matmul_us(m: int, n: int, k: int, dtype: str, config: dict[str, Any]) -> fl
         peak = float(config.get("quant_matmul", {}).get("peak_tops", {}).get("INT8", peak))
     flops = 2.0 * m * n * k
     return flops / max(peak * 1_000_000.0, 1e-9)
+
+
+def _op_kind_normalized(op_type: str) -> str:
+    return op_type.replace("_", "").replace("-", "").lower()
+
+
+def _unknown_runtime_bounds(
+    spec: OtherOpSpec,
+    traffic_bytes: float,
+    vector_ops: float,
+    cube_compute_us: float,
+    cfg: dict[str, Any],
+    hbm_bandwidth: float,
+) -> tuple[float, float, str]:
+    normalized = _op_kind_normalized(spec.op_type)
+    base_hbm = _bytes_to_us(traffic_bytes, hbm_bandwidth)
+    base_vector = _ops_to_us(vector_ops, cfg["vector_gops"])
+    base_body = max(base_hbm, base_vector, cube_compute_us)
+    reason = "source_tiling_search_bounds"
+
+    if spec.op_family == "index_scatter_routing":
+        if normalized in {"gatherv2", "gatherv3", "gatherelements", "gatherelementsv2"}:
+            min_factor, max_factor = 0.65, 3.0
+            reason = "missing_indices_linear_vs_random_gather"
+        elif normalized in {"scatter", "scatterupdate", "scatterndupdate", "scatterelementsv2"}:
+            min_factor, max_factor = 0.75, 4.0
+            reason = "missing_indices_write_conflict_bounds"
+        elif normalized in {"maskedselectv3", "nonzero"}:
+            min_factor, max_factor = 0.35, 2.5
+            reason = "missing_mask_selected_count_bounds"
+        elif normalized == "topkv2":
+            min_factor, max_factor = 0.7, 3.5
+            reason = "missing_topk_distribution_bounds"
+        elif normalized.startswith("moe"):
+            min_factor, max_factor = 0.5, 3.0
+            reason = "missing_moe_routing_distribution_bounds"
+        else:
+            min_factor, max_factor = 0.75, 3.0
+            reason = "missing_index_runtime_values_bounds"
+        return base_body * min_factor, base_body * max_factor, reason
+
+    if spec.op_family == "lightning_indexer_fusion":
+        return base_body * 0.6, base_body * 2.8, "missing_sparse_runtime_values_dense_vs_active_blocks"
+
+    if spec.op_family == "mla_prolog_fusion":
+        return base_body * 0.75, base_body * 1.8, "missing_mla_tiling_key_actual_seq_cache_index"
+
+    if spec.op_family == "layout_memory" and spec.missing_attrs:
+        return base_body * 0.7, base_body * 2.2, "missing_layout_attrs_candidate_strategy_bounds"
+
+    if spec.op_family == "quant_vector_fusion" and spec.missing_attrs:
+        return base_body * 0.8, base_body * 1.6, "missing_quant_attrs_candidate_bounds"
+
+    if spec.op_family == "cv_regular":
+        return base_body * 0.6, base_body * 4.0, "cv_source_path_or_attrs_pending_bounds"
+
+    return base_body, base_body, reason
+
+
+def _cacheline_aligned_bytes(num_bytes: int, cacheline_bytes: int = 128) -> int:
+    if num_bytes <= 0:
+        return 0
+    return ceil_div(num_bytes, cacheline_bytes) * cacheline_bytes
+
+
+def _index_scatter_runtime_bytes(spec: OtherOpSpec) -> tuple[float, float, str] | None:
+    normalized = _op_kind_normalized(spec.op_type)
+    input_bytes = sum(spec.input_bytes)
+    output_bytes = sum(spec.output_bytes)
+    if normalized in {"gatherv2", "gatherv3", "gatherelements", "gatherelementsv2"}:
+        data_shape = spec.input_shapes[0] if spec.input_shapes else []
+        output_shape = spec.output_shapes[0] if spec.output_shapes else []
+        data_dtype = spec.input_dtypes[0] if spec.input_dtypes else ""
+        indices_bytes = spec.input_bytes[1] if len(spec.input_bytes) > 1 else 0
+        selected_bytes = output_bytes
+        row_bytes = 0
+        if data_shape and output_shape:
+            axis_inner = output_shape[-1] if len(output_shape) >= 1 else 1
+            row_bytes = axis_inner * dtype_size(data_dtype)
+        random_read_bytes = _cacheline_aligned_bytes(row_bytes) * max(spec.input_elements[1] if len(spec.input_elements) > 1 else 1, 1)
+        min_bytes = indices_bytes + selected_bytes + output_bytes
+        max_bytes = indices_bytes + max(selected_bytes, random_read_bytes) + output_bytes
+        return float(min_bytes), float(max_bytes), "missing_indices_selected_slice_cacheline_bounds"
+
+    if normalized in {"scatter", "scatterupdate", "scatterndupdate", "scatterelementsv2"}:
+        indices_bytes = spec.input_bytes[1] if len(spec.input_bytes) > 1 else 0
+        updates_bytes = spec.input_bytes[2] if len(spec.input_bytes) > 2 else output_bytes
+        min_bytes = indices_bytes + updates_bytes + output_bytes
+        max_bytes = indices_bytes + updates_bytes * 2 + output_bytes
+        return float(min_bytes), float(max_bytes), "missing_scatter_indices_update_write_bounds"
+
+    if normalized in {"maskedselectv3", "nonzero"}:
+        mask_bytes = spec.input_bytes[1] if len(spec.input_bytes) > 1 else 0
+        min_bytes = input_bytes + mask_bytes
+        max_bytes = input_bytes + mask_bytes + output_bytes
+        return float(min_bytes), float(max_bytes), "missing_mask_selected_count_bounds"
+
+    if normalized.startswith("moe"):
+        min_bytes = input_bytes + output_bytes
+        max_bytes = input_bytes + output_bytes * 2
+        return float(min_bytes), float(max_bytes), "missing_moe_routing_distribution_bounds"
+
+    return None
 
 
 def _estimate_mla_prolog(spec: OtherOpSpec, cfg: dict[str, Any], config: dict[str, Any], hbm_bandwidth: float) -> tuple[float, float, float, float]:
@@ -403,7 +514,13 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
         )
     elif spec.op_family == "index_scatter_routing":
         tiling_source = "analytic_fallback_missing_runtime_values"
-        traffic_bytes = (input_bytes + output_bytes) * cfg["index_random_access_factor"]
+        runtime_bounds = _index_scatter_runtime_bytes(spec)
+        if runtime_bounds is not None:
+            min_bytes, max_bytes, runtime_bounds_reason = runtime_bounds
+            traffic_bytes = (min_bytes + max_bytes) / 2.0
+        else:
+            runtime_bounds_reason = "missing_index_runtime_values_bounds"
+            traffic_bytes = input_bytes + output_bytes
         vector_ops = float(spec.logical_elements)
     elif spec.op_family == "cv_regular":
         tiling_source = "analytic_fallback_source_pending"
@@ -414,8 +531,42 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
     vector_compute_us = _ops_to_us(vector_ops, cfg["vector_gops"])
     body_us = max(vector_compute_us, hbm_us) + cube_compute_us + layout_overhead_us + workspace_us + sync_overhead_us
     launch_us = cfg["launch_overhead_us"]
+    if spec.op_family == "index_scatter_routing" and "runtime_bounds" in locals() and runtime_bounds is not None:
+        min_bytes, max_bytes, bounds_reason = runtime_bounds
+        min_hbm = _bytes_to_us(min_bytes, hbm_bandwidth)
+        max_hbm = _bytes_to_us(max_bytes, hbm_bandwidth)
+        vector_bound = _ops_to_us(vector_ops, cfg["vector_gops"])
+        bounds_min_us = max(min_hbm, vector_bound, cube_compute_us)
+        bounds_max_us = max(max_hbm, vector_bound, cube_compute_us)
+    else:
+        bounds_min_us, bounds_max_us, bounds_reason = _unknown_runtime_bounds(
+            spec,
+            traffic_bytes,
+            vector_ops,
+            cube_compute_us,
+            cfg,
+            hbm_bandwidth,
+        )
+    bounds_min_us += layout_overhead_us + workspace_us + sync_overhead_us
+    bounds_max_us += layout_overhead_us + workspace_us + sync_overhead_us
+    if bounds_max_us < bounds_min_us:
+        bounds_max_us = bounds_min_us
+    if (
+        spec.op_family in {
+            "index_scatter_routing",
+            "lightning_indexer_fusion",
+            "mla_prolog_fusion",
+            "cv_regular",
+        }
+        or spec.missing_attrs
+    ):
+        body_us = (bounds_min_us + bounds_max_us) / 2.0
     total_us = body_us + launch_us
     ideal_lower_bound_us = max(_bytes_to_us(input_bytes + output_bytes, hbm_bandwidth), vector_compute_us, cube_compute_us)
+    optimal_tiling_us = ideal_lower_bound_us + launch_us
+    source_schedule_bound_us = body_us + launch_us
+    bounds_min_total_us = bounds_min_us + launch_us
+    bounds_max_total_us = bounds_max_us + launch_us
     dominant_base = max(hbm_us, vector_compute_us, cube_compute_us)
     if cube_compute_us >= hbm_us and cube_compute_us >= vector_compute_us:
         dominant = "cube"
@@ -433,9 +584,21 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
         workspace_us=workspace_us,
         sync_overhead_us=sync_overhead_us,
         launch_overhead_us=launch_us,
+        bounds_min_us=bounds_min_total_us,
+        bounds_max_us=bounds_max_total_us,
+        optimal_tiling_us=optimal_tiling_us,
+        source_schedule_bound_us=source_schedule_bound_us,
         total_us=total_us,
         ideal_lower_bound_us=ideal_lower_bound_us,
         current_kernel_bound_us=body_us,
         tiling_source=tiling_source,
+        forward_eval_mode=(
+            "source_tiling_search_no_calib"
+            if spec.op_family in {"mla_prolog_fusion", "lightning_indexer_fusion", "cv_regular"} or spec.missing_attrs
+            else "bounds_first_no_runtime_values"
+            if spec.op_family == "index_scatter_routing"
+            else "source_strategy_replay"
+        ),
+        bounds_reason=bounds_reason,
         dominant_component=dominant,
     )
