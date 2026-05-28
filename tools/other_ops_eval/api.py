@@ -71,7 +71,9 @@ def _elementwise_op_factor(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
         return max(cfg["transcendental_op_factor"], 8.0)
     if normalized in {"realdiv"}:
         return 4.0
-    if normalized in {"greaterequal", "greater", "less", "equal", "selectv2", "clipbyvaluev2"}:
+    if normalized in {"floordiv", "floormod"}:
+        return 5.0
+    if normalized in {"greaterequal", "greater", "less", "equal", "maximum", "logicalnot", "selectv2", "clipbyvaluev2"}:
         return 2.0
     return 1.0
 
@@ -81,6 +83,8 @@ def _reduction_passes(spec: OtherOpSpec, cfg: dict[str, Any]) -> float:
     if normalized == "softmaxv2":
         return cfg["softmax_passes"]
     if normalized == "reducemean":
+        return cfg["reduction_passes"] + 1.0
+    if normalized == "cumsum":
         return cfg["reduction_passes"] + 1.0
     return cfg["reduction_passes"]
 
@@ -114,6 +118,8 @@ def estimate_other_op(spec: OtherOpSpec, config: dict[str, Any]) -> OtherOpCostE
 
     if spec.op_family == "layout_memory":
         vector_ops = 0.0
+        if spec.op_type.replace("_", "").replace("-", "").lower() == "tril":
+            vector_ops = float(spec.logical_elements) * cfg["activation_op_factor"]
         if spec.source_strategy in {
             "linear_ub_cast",
             "linear_ub_copy",

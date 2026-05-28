@@ -625,7 +625,7 @@ other_ops 专用 summary 结果：
 - 忽略项：`AutomaticBufferFusionOp` 是非固定 pattern 的融合包装算子，无法仅从 `Type/shape` 直接评估。
 - Attention shape `N/A` 行：`FusedInferAttentionScore` 140 行，需要 profiling 补 shape 或从上下文恢复规格。
 
-本验证集新增 unsupported Type：
+本验证集 stage1 新增 unsupported Type：
 
 - `FloorDiv`
 - `FloorMod`
@@ -637,6 +637,20 @@ other_ops 专用 summary 结果：
 - `LogicalNot`
 - `Data`
 - `Unpack`
+
+stage2 已完成覆盖：
+
+- `FloorDiv`
+- `FloorMod`
+- `ReduceMax`
+- `GatherElementsV2`
+- `Maximum`
+- `Cumsum`
+- `Tril`
+- `LogicalNot`
+- `Unpack`
+
+stage2 后 `other_ops` resolved 从 `1740` 增加到 `1860`，unresolved 从 `630` 降到 `510`，median relative error 从 `0.563` 降到 `0.515`。剩余新增 unsupported 仅 `Data` 5 行；`GatherV2` 缺 indices 仍是最大误差 tail。
 
 ## 2026-05-27 AutomaticBufferFusionOp 口径调整
 

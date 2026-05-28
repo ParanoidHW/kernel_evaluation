@@ -52,8 +52,10 @@ LAYOUT_MEMORY_TYPES = {
     "concatv2d",
     "splitvd",
     "pack",
+    "unpack",
     "tile",
     "memset",
+    "tril",
 }
 
 ELEMENTWISE_TYPES = {
@@ -78,10 +80,14 @@ ELEMENTWISE_TYPES = {
     "clipbyvaluev2",
     "cos",
     "sin",
+    "floordiv",
+    "floormod",
+    "maximum",
+    "logicalnot",
     "rotarypositionembedding",
 }
 
-REDUCTION_TYPES = {"reducesum", "reducesumd", "reducemean", "reduceall", "softmaxv2"}
+REDUCTION_TYPES = {"reducesum", "reducesumd", "reducemean", "reducemax", "reduceall", "softmaxv2", "cumsum"}
 
 NORM_ACTIVATION_TYPES = {
     "rmsnorm",
@@ -102,6 +108,7 @@ INDEX_SCATTER_TYPES = {
     "gatherv2",
     "gatherv3",
     "gatherelements",
+    "gatherelementsv2",
     "scatter",
     "scatterupdate",
     "scatterndupdate",
@@ -191,8 +198,10 @@ LAYOUT_SOURCE_PATHS = {
     "concatv2d": "ops-math/conversion/concat",
     "splitvd": "ops-math/conversion/split",
     "pack": "ops-math/conversion/pack",
+    "unpack": "ops-math/conversion/unpack",
     "tile": "ops-math/math/tile",
     "memset": "ops-math/conversion/mem_set",
+    "tril": "ops-math/conversion/tril",
 }
 
 ELEMENTWISE_SOURCE_PATHS = {
@@ -206,6 +215,10 @@ ELEMENTWISE_SOURCE_PATHS = {
     "selectv2": "ops-math/math/select_v2",
     "cos": "ops-math/math/cos",
     "sin": "ops-math/math/sin",
+    "floordiv": "ops-math/math/floor_div",
+    "floormod": "ops-math/math/floor_mod",
+    "maximum": "ops-math/math/maximum",
+    "logicalnot": "ops-math/math/logical_not",
     "rotarypositionembedding": "ops-transformer-master/posembedding/rotary_position_embedding",
 }
 
@@ -213,7 +226,9 @@ REDUCTION_SOURCE_PATHS = {
     "reducesum": "ops-math/math/reduce_sum",
     "reducesumd": "ops-math/math/reduce_sum",
     "reducemean": "ops-math/math/reduce_mean",
+    "reducemax": "ops-math/math/reduce_max",
     "reduceall": "ops-math/math/reduce_all",
+    "cumsum": "ops-math/math/cumsum",
     "softmaxv2": "ops-nn/activation/softmax_v2",
 }
 
@@ -236,6 +251,7 @@ INDEX_SCATTER_SOURCE_PATHS = {
     "gatherv2": "ops-nn/index/gather_v2",
     "gatherv3": "ops-nn/index/gather_v3",
     "gatherelements": "ops-nn/index/gather_elements",
+    "gatherelementsv2": "ops-nn/index/gather_elements_v2",
     "scatter": "ops-nn/index/scatter",
     "scatterupdate": "ops-nn/index/scatter",
     "scatterndupdate": "ops-nn/index/scatter_nd",
@@ -351,7 +367,11 @@ def infer_missing_attrs(op_type: str, family: str) -> str:
         missing.append("perm")
     if normalized in {"slice", "stridedsliced"}:
         missing.extend(["begin", "size_or_end", "stride"])
-    if normalized in {"concatd", "concatv2d", "splitvd", "pack"}:
+    if normalized in {"concatd", "concatv2d", "splitvd", "pack", "unpack"}:
+        missing.append("axis")
+    if normalized == "tril":
+        missing.append("diagonal")
+    if normalized in {"reducemax", "cumsum"}:
         missing.append("axis")
     if normalized == "tile":
         missing.append("multiples")
@@ -405,15 +425,21 @@ def infer_source_strategy(
             return "split_axis_strategy_missing_axis" if missing_attrs else "split_axis_strategy"
         if normalized == "pack":
             return "pack_to_concat_missing_axis" if missing_attrs else "pack_to_concat"
+        if normalized == "unpack":
+            return "unpack_to_split_missing_axis" if missing_attrs else "unpack_to_split"
         if normalized == "tile":
             return "tile_broadcast_copy_missing_multiples" if missing_attrs else "tile_broadcast_copy"
         if normalized == "memset":
             return "memset_output_fill"
+        if normalized == "tril":
+            return "tril_mask_fill_missing_diagonal" if missing_attrs else "tril_mask_fill"
     if family == "elementwise_vector":
         if normalized in {"cos", "sin", "sigmoid"}:
             return "elementwise_transcendental_vector_pipeline"
-        if normalized in {"pows", "pow", "realdiv"}:
+        if normalized in {"pows", "pow", "realdiv", "floordiv", "floormod"}:
             return "elementwise_expensive_math_vector_pipeline"
+        if normalized in {"maximum", "logicalnot"}:
+            return "elementwise_compare_or_logic_vector_pipeline"
         if normalized in {"zeroslike", "oneslike", "fill"}:
             return "elementwise_fill_vector_pipeline"
         if normalized == "range":
@@ -430,6 +456,8 @@ def infer_source_strategy(
             return "softmax_reduce_exp_sum_normalize"
         if normalized == "reducemean":
             return "reduce_tree_with_scale"
+        if normalized == "cumsum":
+            return "prefix_scan_missing_axis" if missing_attrs else "prefix_scan"
         return "reduce_tree"
     if family == "norm_activation":
         if normalized in {"swish", "gelu", "swiglu", "gegluv2", "dequantswigluquant"}:
@@ -444,7 +472,7 @@ def infer_source_strategy(
             return "groupnorm_reduce_silu"
         return "norm_activation_source_pending"
     if family == "index_scatter_routing":
-        if normalized in {"gatherv2", "gatherv3", "gatherelements"}:
+        if normalized in {"gatherv2", "gatherv3", "gatherelements", "gatherelementsv2"}:
             return "gather_random_read_missing_indices"
         if normalized in {"scatter", "scatterupdate", "scatterndupdate", "scatterelementsv2"}:
             return "scatter_random_write_missing_indices"
@@ -481,8 +509,10 @@ def infer_layout_pattern(
         return "rank_permutation"
     if normalized in {"slice", "stridedsliced", "asstrided"}:
         return "strided_region"
-    if normalized in {"concatd", "concatv2d", "splitvd", "pack"}:
+    if normalized in {"concatd", "concatv2d", "splitvd", "pack", "unpack"}:
         return "axis_segment"
+    if normalized == "tril":
+        return "triangular_mask_fill"
     if normalized == "tile":
         return "broadcast_tile"
     if normalized == "memset":
